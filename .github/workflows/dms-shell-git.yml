@@ -1,0 +1,118 @@
+name: Build dms-shell-git (x86-64-v3)
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */1 * * *"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      # -------------------------
+      # Update system
+      # -------------------------
+      - name: Update base system
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel git sudo curl go quickshell
+
+      # -------------------------
+      # Create builder user
+      # -------------------------
+      - name: Create builder user
+        run: |
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+      # -------------------------
+      # Create PKGBUILD
+      # -------------------------
+      - name: Create PKGBUILD
+        run: |
+          cat > /home/builder/PKGBUILD << 'EOF'
+          pkgname=dms-shell-git
+          pkgver=0.0.0
+          pkgrel=1
+          pkgdesc="Dank Material Shell (git, GOAMD64=v3)"
+          arch=(x86_64)
+          url="https://github.com/AvengeMedia/DankMaterialShell"
+          license=(GPL-3.0-or-later)
+
+          depends=(quickshell)
+          makedepends=(git make go)
+
+          provides=(dms-shell dms-git)
+          conflicts=(dms-shell dms-git)
+
+          source=("git+$url.git")
+          sha256sums=('SKIP')
+
+          pkgver() {
+            cd DankMaterialShell
+            git describe --long --tags --abbrev=7 2>/dev/null \
+              | sed 's/^v//;s/-/.r/;s/-/./' || \
+              printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+          }
+
+          build() {
+            cd DankMaterialShell/core
+            export GOAMD64=v3
+            make
+          }
+
+          package() {
+            cd DankMaterialShell
+
+            # Install CLI
+            install -Dm755 core/bin/dms "$pkgdir/usr/bin/dms"
+
+            # Install shell to correct path (fixes doctor warnings)
+            mkdir -p "$pkgdir/usr/share/quickshell/dms"
+            cp -r quickshell/* "$pkgdir/usr/share/quickshell/dms/"
+          }
+          EOF
+
+          chown -R builder:builder /home/builder
+
+      # -------------------------
+      # Build package
+      # -------------------------
+      - name: Build dms-shell-git
+        run: |
+          su builder -c "cd ~ && makepkg -s --noconfirm"
+
+      # -------------------------
+      # Prepare release
+      # -------------------------
+      - name: Prepare release
+        id: pkg
+        run: |
+          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "dms-shell-git-*-x86_64.pkg.tar.zst" ! -name "*debug*")
+          PKG_FILE=$(basename "$PKG_PATH")
+
+          VERSION=$(echo "$PKG_FILE" | sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
+          NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
+
+          mkdir release
+          cp "$PKG_PATH" "release/$NEW_NAME"
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      # -------------------------
+      # Create GitHub Release
+      # -------------------------
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.version }}-v3
+          name: dms-shell-git ${{ steps.pkg.outputs.version }} (GOAMD64=v3)
+          files: release/*.pkg.tar.zst
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
