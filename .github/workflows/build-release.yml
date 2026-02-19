@@ -1,0 +1,117 @@
+name: Build dms-shell (x86-64-v3 Release)
+
+permissions:
+  contents: write
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      # -------------------------
+      # Update system
+      # -------------------------
+      - name: Update base system
+        run: |
+          pacman -Syyu --noconfirm
+          pacman -S --noconfirm archlinux-keyring
+          pacman -S --noconfirm base-devel git sudo curl go
+
+      # -------------------------
+      # Create builder user
+      # -------------------------
+      - name: Create builder user
+        run: |
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+      # -------------------------
+      # Extract version from tag
+      # -------------------------
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      # -------------------------
+      # Create PKGBUILD
+      # -------------------------
+      - name: Create PKGBUILD
+        run: |
+          cat > /home/builder/PKGBUILD << EOF
+          pkgname=dms-shell
+          pkgver=${{ steps.version.outputs.version }}
+          pkgrel=1
+          pkgdesc="Dank Material Shell (Release, GOAMD64=v3)"
+          arch=(x86_64)
+          url="https://github.com/AvengeMedia/DankMaterialShell"
+          license=(GPL-3.0-or-later)
+
+          depends=(quickshell)
+          makedepends=(go make)
+
+          source=("\$url/archive/refs/tags/v\$pkgver.tar.gz")
+          sha256sums=('SKIP')
+
+          build() {
+            cd DankMaterialShell-\$pkgver/core
+            export GOAMD64=v3
+            export CGO_ENABLED=1
+            make
+          }
+
+          package() {
+            cd DankMaterialShell-\$pkgver
+
+            install -Dm755 core/bin/dms "\$pkgdir/usr/bin/dms"
+
+            mkdir -p "\$pkgdir/usr/share/quickshell/dms"
+            cp -r quickshell/* "\$pkgdir/usr/share/quickshell/dms/"
+          }
+          EOF
+
+          chown -R builder:builder /home/builder
+
+      # -------------------------
+      # Build package
+      # -------------------------
+      - name: Build dms-shell
+        run: |
+          su builder -c "cd ~ && makepkg -s --noconfirm"
+
+      # -------------------------
+      # Prepare release artifact
+      # -------------------------
+      - name: Prepare release
+        id: pkg
+        run: |
+          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "dms-shell-*-x86_64.pkg.tar.zst" | head -n1)
+
+          if [ -z "$PKG_PATH" ]; then
+            echo "Package not found!"
+            exit 1
+          fi
+
+          PKG_FILE=$(basename "$PKG_PATH")
+          VERSION=${{ steps.version.outputs.version }}
+          NEW_NAME="dms-shell-${VERSION}-x86_64_v3.pkg.tar.zst"
+
+          mkdir release
+          cp "$PKG_PATH" "release/$NEW_NAME"
+
+      # -------------------------
+      # Upload to existing release
+      # -------------------------
+      - name: Upload package to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.pkg.tar.zst
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
