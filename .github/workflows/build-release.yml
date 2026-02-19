@@ -1,44 +1,64 @@
-name: Build dms-shell (x86-64-v3 Release)
+name: Sync & Build x86-64-v3
 
 permissions:
   contents: write
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
 
 jobs:
-  build:
+  sync-build:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
 
     steps:
-      # -------------------------
-      # Update system
-      # -------------------------
-      - name: Update base system
+      - name: Install tools
         run: |
           pacman -Syyu --noconfirm
-          pacman -S --noconfirm archlinux-keyring
-          pacman -S --noconfirm base-devel git sudo curl go
+          pacman -S --noconfirm archlinux-keyring base-devel git curl go jq
 
       # -------------------------
-      # Create builder user
+      # Get latest upstream release
       # -------------------------
-      - name: Create builder user
+      - name: Fetch upstream release
+        id: upstream
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/AvengeMedia/DankMaterialShell/releases/latest | jq -r .tag_name)
+          VERSION=${LATEST#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$LATEST" >> $GITHUB_OUTPUT
+
+      # -------------------------
+      # Check if already built
+      # -------------------------
+      - name: Check existing release
+        id: check
+        run: |
+          if curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.upstream.outputs.tag }} | grep -q tag_name; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      # -------------------------
+      # Stop if already exists
+      # -------------------------
+      - name: Stop if exists
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          echo "Release already exists. Skipping."
+          exit 0
+
+      # -------------------------
+      # Create builder
+      # -------------------------
+      - name: Create builder
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-
-      # -------------------------
-      # Extract version from tag
-      # -------------------------
-      - name: Extract version
-        id: version
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       # -------------------------
       # Create PKGBUILD
@@ -47,9 +67,9 @@ jobs:
         run: |
           cat > /home/builder/PKGBUILD << EOF
           pkgname=dms-shell
-          pkgver=${{ steps.version.outputs.version }}
+          pkgver=${{ steps.upstream.outputs.version }}
           pkgrel=1
-          pkgdesc="Dank Material Shell (Release, GOAMD64=v3)"
+          pkgdesc="Dank Material Shell (x86-64-v3 optimized)"
           arch=(x86_64)
           url="https://github.com/AvengeMedia/DankMaterialShell"
           license=(GPL-3.0-or-later)
@@ -69,9 +89,7 @@ jobs:
 
           package() {
             cd DankMaterialShell-\$pkgver
-
             install -Dm755 core/bin/dms "\$pkgdir/usr/bin/dms"
-
             mkdir -p "\$pkgdir/usr/share/quickshell/dms"
             cp -r quickshell/* "\$pkgdir/usr/share/quickshell/dms/"
           }
@@ -80,38 +98,30 @@ jobs:
           chown -R builder:builder /home/builder
 
       # -------------------------
-      # Build package
+      # Build
       # -------------------------
-      - name: Build dms-shell
+      - name: Build package
         run: |
           su builder -c "cd ~ && makepkg -s --noconfirm"
 
       # -------------------------
-      # Prepare release artifact
+      # Rename
       # -------------------------
-      - name: Prepare release
-        id: pkg
+      - name: Prepare artifact
         run: |
-          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "dms-shell-*-x86_64.pkg.tar.zst" | head -n1)
-
-          if [ -z "$PKG_PATH" ]; then
-            echo "Package not found!"
-            exit 1
-          fi
-
-          PKG_FILE=$(basename "$PKG_PATH")
-          VERSION=${{ steps.version.outputs.version }}
-          NEW_NAME="dms-shell-${VERSION}-x86_64_v3.pkg.tar.zst"
-
+          PKG_PATH=$(find /home/builder -name "*.pkg.tar.zst" | head -n1)
+          VERSION=${{ steps.upstream.outputs.version }}
           mkdir release
-          cp "$PKG_PATH" "release/$NEW_NAME"
+          cp "$PKG_PATH" "release/dms-shell-${VERSION}-x86_64_v3.pkg.tar.zst"
 
       # -------------------------
-      # Upload to existing release
+      # Create release
       # -------------------------
-      - name: Upload package to GitHub Release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.upstream.outputs.tag }}
+          name: dms-shell ${{ steps.upstream.outputs.version }} (x86-64-v3)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
