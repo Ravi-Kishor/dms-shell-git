@@ -15,24 +15,34 @@ jobs:
       image: archlinux:latest
 
     steps:
-      # 1. Prepare Environment & Permissions
+      # 1. Initialize System & Permissions
       - name: System setup
         run: |
+          # Refresh keys to prevent package installation failures
+          pacman -Sy --noconfirm archlinux-keyring
           pacman -Syu --noconfirm --needed base-devel git sudo go quickshell
+          
+          # Setup builder user
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-          # Allow the builder to write to the current workspace
+          
+          # Fix workspace ownership so builder can work here
           chown -R builder:builder .
 
-      # 2. Checkout (as builder to avoid permission headaches later)
+      # 2. Checkout
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Important for git describe/pkgver() to work
 
-      # 3. Create PKGBUILD
+      # 3. Fix Git Safety & Create PKGBUILD
       - name: Create PKGBUILD
-        shell: bash
         run: |
           sudo -u builder bash << 'EOF'
+          # CRITICAL: Fix git "dubious ownership" for the builder user
+          git config --global --add safe.directory /__w/$(basename $(pwd))/$(basename $(pwd))
+          git config --global --add safe.directory "*"
+
           cat > PKGBUILD << 'INNER_EOF'
           pkgname=dms-shell-git
           pkgver=0.0.0
@@ -71,29 +81,25 @@ jobs:
           INNER_EOF
           EOF
 
-      # 4. Build package
+      # 4. Build
       - name: Build dms-shell-git
         run: |
-          sudo -u builder bash -c 'export MAKEFLAGS="-j$(nproc)" && makepkg -s --noconfirm'
+          # Run as builder; -f allows overwriting if a previous failed run left files
+          sudo -u builder bash -c 'export MAKEFLAGS="-j$(nproc)" && makepkg -sc --noconfirm'
 
-      # 5. Prepare Release Artifacts
+      # 5. Prepare Release
       - name: Prepare release
         id: pkg
         run: |
-          # Find the built package
           PKG_PATH=$(ls dms-shell-git-*-x86_64.pkg.tar.zst | grep -v "debug" | head -n 1)
-          
-          # Extract version for the Tag
           VERSION=$(echo "$PKG_PATH" | sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
-          
-          # Rename to include v3 suffix
           NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
-          mv "$PKG_PATH" "$NEW_NAME"
           
+          mv "$PKG_PATH" "$NEW_NAME"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "pkg_name=$NEW_NAME" >> $GITHUB_OUTPUT
 
-      # 6. Create GitHub Release
+      # 6. Upload
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -102,8 +108,6 @@ jobs:
           body: |
             Built with:
             - `GOAMD64=v3` (AVX2, BMI2, FMA enabled)
-            - Automated clean build
-          files: |
-            ${{ steps.pkg.outputs.pkg_name }}
+          files: ${{ steps.pkg.outputs.pkg_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
