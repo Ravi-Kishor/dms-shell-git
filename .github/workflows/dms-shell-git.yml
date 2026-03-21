@@ -37,6 +37,9 @@ jobs:
       - name: Install quickshell
         run: |
           su builder -c '
+            export HOME=/home/builder
+            cd /home/builder
+
             git clone https://aur.archlinux.org/quickshell.git
             cd quickshell
             makepkg -si --noconfirm
@@ -77,16 +80,16 @@ jobs:
           build() {
             cd DankMaterialShell/core
 
-            # Go tuning
+            # Go tuning (max possible)
             export GOAMD64=v3
             export GOFLAGS="-trimpath -buildmode=pie"
             export CGO_ENABLED=1
 
-            # Zen 3 optimization
+            # Zen 3 tuning
             export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
             export CXXFLAGS="$CFLAGS"
 
-            # Linker tuning
+            # Linker optimizations
             export LDFLAGS="-Wl,-O1,--as-needed,-z,relro,-z,now"
 
             make
@@ -110,8 +113,12 @@ jobs:
       - name: Build dms-shell-git
         run: |
           su builder -c '
+            export HOME=/home/builder
+            cd /home/builder
+
             export MAKEFLAGS="-j$(nproc)"
-            cd ~ && makepkg -s --noconfirm
+
+            makepkg -s --noconfirm
           '
 
       # -------------------------
