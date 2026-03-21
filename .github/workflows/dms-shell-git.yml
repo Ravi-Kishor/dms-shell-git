@@ -1,4 +1,4 @@
-name: Build dms-shell-git (x86-64-v3)
+name: Build dms-shell-git (Zen 3 Optimized)
 
 permissions:
   contents: write
@@ -15,92 +15,130 @@ jobs:
       image: archlinux:latest
 
     steps:
+      # -------------------------
+      # Update system
+      # -------------------------
       - name: Update base system
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel git sudo curl go quickshell
+          pacman -S --noconfirm base-devel git sudo curl go
 
+      # -------------------------
+      # Create builder user
+      # -------------------------
       - name: Create builder user
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
+      # -------------------------
+      # Install quickshell (AUR)
+      # -------------------------
+      - name: Install quickshell
+        run: |
+          su builder -c '
+            git clone https://aur.archlinux.org/quickshell.git
+            cd quickshell
+            makepkg -si --noconfirm
+          '
+
+      # -------------------------
+      # Create PKGBUILD
+      # -------------------------
       - name: Create PKGBUILD
         run: |
           cat > /home/builder/PKGBUILD << 'EOF'
           pkgname=dms-shell-git
           pkgver=0.0.0
           pkgrel=1
-          pkgdesc="Dank Material Shell (git, GOAMD64=v3 optimized)"
+          pkgdesc="Dank Material Shell (git, Zen 3 optimized)"
           arch=(x86_64)
           url="https://github.com/AvengeMedia/DankMaterialShell"
           license=(GPL-3.0-or-later)
+
           depends=(quickshell)
           makedepends=(git go)
+
           provides=(dms-shell dms-git)
           conflicts=(dms-shell dms-git)
+
           source=("git+$url.git")
           sha256sums=('SKIP')
 
+          options=(!debug)
+
           pkgver() {
-            cd "$srcdir/DankMaterialShell"
-            git describe --long --tags --abbrev=7 2>/dev/null | sed 's/^v//;s/-/.r/;s/-/./' || \
-            printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+            cd DankMaterialShell
+            git describe --long --tags --abbrev=7 2>/dev/null \
+              | sed 's/^v//;s/-/.r/;s/-/./' || \
+              printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
           }
 
           build() {
-            cd "$srcdir/DankMaterialShell"
-            if [ -d "core" ]; then cd core; fi
-            
+            cd DankMaterialShell/core
+
+            # Go tuning
             export GOAMD64=v3
+            export GOFLAGS="-trimpath -buildmode=pie"
             export CGO_ENABLED=1
-            export GOFLAGS="-buildvcs=false -trimpath"
-            go build -o dms-bin .
+
+            # Zen 3 optimization
+            export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
+            export CXXFLAGS="$CFLAGS"
+
+            # Linker tuning
+            export LDFLAGS="-Wl,-O1,--as-needed,-z,relro,-z,now"
+
+            make
           }
 
           package() {
-            cd "$srcdir/DankMaterialShell"
-            BINARY_PATH=$(find . -name "dms-bin" -type f | head -n 1)
-            install -Dm755 "$BINARY_PATH" "$pkgdir/usr/bin/dms"
+            cd DankMaterialShell
 
-            if [ -d "quickshell" ]; then
-              install -dm755 "$pkgdir/usr/share/quickshell/dms"
-              cp -r quickshell/* "$pkgdir/usr/share/quickshell/dms/"
-            fi
+            install -Dm755 core/bin/dms "$pkgdir/usr/bin/dms"
+
+            install -dm755 "$pkgdir/usr/share/quickshell/dms"
+            cp -r quickshell/* "$pkgdir/usr/share/quickshell/dms/"
           }
           EOF
+
           chown -R builder:builder /home/builder
 
+      # -------------------------
+      # Build package
+      # -------------------------
       - name: Build dms-shell-git
         run: |
-          # Fix for Git "dubious ownership" when switching to builder user
-          sudo -u builder git config --global --add safe.directory "*"
-          sudo -u builder bash -c '
+          su builder -c '
             export MAKEFLAGS="-j$(nproc)"
-            export GOAMD64=v3
-            cd /home/builder && makepkg -s --noconfirm
+            cd ~ && makepkg -s --noconfirm
           '
 
+      # -------------------------
+      # Prepare release
+      # -------------------------
       - name: Prepare release
         id: pkg
         run: |
           PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "dms-shell-git-*-x86_64.pkg.tar.zst" ! -name "*debug*")
           PKG_FILE=$(basename "$PKG_PATH")
+
           VERSION=$(echo "$PKG_FILE" | sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
-          NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
+          NEW_NAME="dms-shell-git-${VERSION}-x86_64_znver3.pkg.tar.zst"
 
           mkdir -p release
           cp "$PKG_PATH" "release/$NEW_NAME"
+
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+      # -------------------------
+      # Create GitHub Release
+      # -------------------------
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.pkg.outputs.version }}-v3
-          name: dms-shell-git ${{ steps.pkg.outputs.version }} (x86-64-v3)
-          body: |
-            Built with:
-            - GOAMD64=v3 (AVX2, BMI2, FMA enabled)
+          tag_name: ${{ steps.pkg.outputs.version }}-znver3
+          name: dms-shell-git ${{ steps.pkg.outputs.version }} (Zen 3 Optimized)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
