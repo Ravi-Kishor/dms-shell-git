@@ -1,4 +1,4 @@
-name: Build dms-shell-git (Zen 3 Optimized)
+name: Build dms-shell-git (x86-64-v3)
 
 permissions:
   contents: write
@@ -21,7 +21,7 @@ jobs:
       - name: Update base system
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel git sudo curl go
+          pacman -S --noconfirm base-devel git sudo curl go quickshell
 
       # -------------------------
       # Create builder user
@@ -32,20 +32,6 @@ jobs:
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
       # -------------------------
-      # Install quickshell (AUR)
-      # -------------------------
-      - name: Install quickshell
-        run: |
-          su builder -c '
-            export HOME=/home/builder
-            cd /home/builder
-
-            git clone https://aur.archlinux.org/quickshell.git
-            cd quickshell
-            makepkg -si --noconfirm
-          '
-
-      # -------------------------
       # Create PKGBUILD
       # -------------------------
       - name: Create PKGBUILD
@@ -54,21 +40,19 @@ jobs:
           pkgname=dms-shell-git
           pkgver=0.0.0
           pkgrel=1
-          pkgdesc="Dank Material Shell (git, Zen 3 optimized)"
+          pkgdesc="Dank Material Shell (git, GOAMD64=v3)"
           arch=(x86_64)
           url="https://github.com/AvengeMedia/DankMaterialShell"
           license=(GPL-3.0-or-later)
 
           depends=(quickshell)
-          makedepends=(git go)
+          makedepends=(git make go)
 
           provides=(dms-shell dms-git)
           conflicts=(dms-shell dms-git)
 
           source=("git+$url.git")
           sha256sums=('SKIP')
-
-          options=(!debug)
 
           pkgver() {
             cd DankMaterialShell
@@ -80,17 +64,17 @@ jobs:
           build() {
             cd DankMaterialShell/core
 
-            # Go tuning (max possible)
+            # Go optimization
             export GOAMD64=v3
             export GOFLAGS="-trimpath -buildmode=pie"
             export CGO_ENABLED=1
 
-            # Zen 3 tuning
+            # Zen 3 optimization (YOUR requested aggressive version)
             export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
             export CXXFLAGS="$CFLAGS"
 
-            # Linker optimizations
-            export LDFLAGS="-Wl,-O1,--as-needed,-z,relro,-z,now"
+            # Linker optimization
+            export LDFLAGS="-Wl,-O1,--as-needed"
 
             make
           }
@@ -113,12 +97,13 @@ jobs:
       - name: Build dms-shell-git
         run: |
           su builder -c '
-            export HOME=/home/builder
-            cd /home/builder
-
             export MAKEFLAGS="-j$(nproc)"
-
-            makepkg -s --noconfirm
+            export GOAMD64=v3
+            export GOFLAGS="-trimpath -buildmode=pie"
+            export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
+            export CXXFLAGS="$CFLAGS"
+            export LDFLAGS="-Wl,-O1,--as-needed"
+            cd ~ && makepkg -s --noconfirm
           '
 
       # -------------------------
@@ -131,7 +116,7 @@ jobs:
           PKG_FILE=$(basename "$PKG_PATH")
 
           VERSION=$(echo "$PKG_FILE" | sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
-          NEW_NAME="dms-shell-git-${VERSION}-x86_64_znver3.pkg.tar.zst"
+          NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
 
           mkdir -p release
           cp "$PKG_PATH" "release/$NEW_NAME"
@@ -144,8 +129,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.pkg.outputs.version }}-znver3
-          name: dms-shell-git ${{ steps.pkg.outputs.version }} (Zen 3 Optimized)
+          tag_name: ${{ steps.pkg.outputs.version }}-v3
+          name: dms-shell-git ${{ steps.pkg.outputs.version }} (GOAMD64=v3)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
