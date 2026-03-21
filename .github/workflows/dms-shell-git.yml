@@ -64,12 +64,11 @@ jobs:
           build() {
             cd DankMaterialShell/core
 
-            # Go optimization
+            # Go optimization (safe)
             export GOAMD64=v3
-            export GOFLAGS="-trimpath -buildmode=pie"
             export CGO_ENABLED=1
 
-            # Zen 3 optimization (YOUR requested aggressive version)
+            # Zen 3 optimization (aggressive but stable)
             export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
             export CXXFLAGS="$CFLAGS"
 
@@ -99,7 +98,6 @@ jobs:
           su builder -c '
             export MAKEFLAGS="-j$(nproc)"
             export GOAMD64=v3
-            export GOFLAGS="-trimpath -buildmode=pie"
             export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
             export CXXFLAGS="$CFLAGS"
             export LDFLAGS="-Wl,-O1,--as-needed"
