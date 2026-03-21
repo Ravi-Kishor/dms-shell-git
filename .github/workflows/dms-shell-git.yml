@@ -37,55 +37,51 @@ jobs:
       - name: Create PKGBUILD
         run: |
           cat > /home/builder/PKGBUILD << 'EOF'
-          pkgname=dms-shell-git
-          pkgver=0.0.0
-          pkgrel=1
-          pkgdesc="Dank Material Shell (git, GOAMD64=v3)"
-          arch=(x86_64)
-          url="https://github.com/AvengeMedia/DankMaterialShell"
-          license=(GPL-3.0-or-later)
+pkgname=dms-shell-git
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Dank Material Shell (git, GOAMD64=v3 optimized)"
+arch=(x86_64)
+url="https://github.com/AvengeMedia/DankMaterialShell"
+license=(GPL-3.0-or-later)
 
-          depends=(quickshell)
-          makedepends=(git make go)
+depends=(quickshell)
+makedepends=(git go)
 
-          provides=(dms-shell dms-git)
-          conflicts=(dms-shell dms-git)
+provides=(dms-shell dms-git)
+conflicts=(dms-shell dms-git)
 
-          source=("git+$url.git")
-          sha256sums=('SKIP')
+source=("git+$url.git")
+sha256sums=('SKIP')
 
-          pkgver() {
-            cd DankMaterialShell
-            git describe --long --tags --abbrev=7 2>/dev/null \
-              | sed 's/^v//;s/-/.r/;s/-/./' || \
-              printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-          }
+pkgver() {
+  cd DankMaterialShell
+  git describe --long --tags --abbrev=7 2>/dev/null \
+    | sed 's/^v//;s/-/.r/;s/-/./' || \
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
 
-          build() {
-            cd DankMaterialShell/core
+build() {
+  cd DankMaterialShell/core
 
-            # Go optimization (IMPORTANT)
-            export GOAMD64=v3
-            export CGO_ENABLED=1
+  # HARD enforce Go optimization
+  export GOAMD64=v3
+  export CGO_ENABLED=1
+  export GOFLAGS="-buildvcs=false -trimpath"
 
-            # Optional native tuning (low impact here but safe)
-            export CFLAGS="-march=znver3 -O2 -pipe"
-            export CXXFLAGS="$CFLAGS"
+  # Build directly (no Makefile risk)
+  go build -o bin/dms
+}
 
-            make
-          }
+package() {
+  cd DankMaterialShell
 
-          package() {
-            cd DankMaterialShell
+  install -Dm755 core/bin/dms "$pkgdir/usr/bin/dms"
 
-            # Install CLI
-            install -Dm755 core/bin/dms "$pkgdir/usr/bin/dms"
-
-            # Install shell files
-            install -dm755 "$pkgdir/usr/share/quickshell/dms"
-            cp -r quickshell/* "$pkgdir/usr/share/quickshell/dms/"
-          }
-          EOF
+  install -dm755 "$pkgdir/usr/share/quickshell/dms"
+  cp -r quickshell/* "$pkgdir/usr/share/quickshell/dms/"
+}
+EOF
 
           chown -R builder:builder /home/builder
 
@@ -97,9 +93,7 @@ jobs:
           su builder -c '
             export MAKEFLAGS="-j$(nproc)"
             export GOAMD64=v3
-            export CFLAGS="-march=znver3 -O2 -pipe"
-            export CXXFLAGS="$CFLAGS"
-            cd ~ && makepkg -s --noconfirm
+            cd ~ && makepkg -s --noconfirm --clean --cleanbuild
           '
 
       # -------------------------
@@ -126,7 +120,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.version }}-v3
-          name: dms-shell-git ${{ steps.pkg.outputs.version }} (GOAMD64=v3)
+          name: dms-shell-git ${{ steps.pkg.outputs.version }} (x86-64-v3)
+          body: |
+            Built with:
+            - GOAMD64=v3 (AVX2, BMI2, FMA enabled)
+            - Clean reproducible build
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
