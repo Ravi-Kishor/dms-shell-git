@@ -63,7 +63,15 @@ jobs:
 
           build() {
             cd DankMaterialShell/core
+
+            # Go optimization (IMPORTANT)
             export GOAMD64=v3
+            export CGO_ENABLED=1
+
+            # Optional native tuning (low impact here but safe)
+            export CFLAGS="-march=znver3 -O2 -pipe"
+            export CXXFLAGS="$CFLAGS"
+
             make
           }
 
@@ -73,8 +81,8 @@ jobs:
             # Install CLI
             install -Dm755 core/bin/dms "$pkgdir/usr/bin/dms"
 
-            # Install shell to correct path (fixes doctor warnings)
-            mkdir -p "$pkgdir/usr/share/quickshell/dms"
+            # Install shell files
+            install -dm755 "$pkgdir/usr/share/quickshell/dms"
             cp -r quickshell/* "$pkgdir/usr/share/quickshell/dms/"
           }
           EOF
@@ -86,7 +94,13 @@ jobs:
       # -------------------------
       - name: Build dms-shell-git
         run: |
-          su builder -c "cd ~ && makepkg -s --noconfirm"
+          su builder -c '
+            export MAKEFLAGS="-j$(nproc)"
+            export GOAMD64=v3
+            export CFLAGS="-march=znver3 -O2 -pipe"
+            export CXXFLAGS="$CFLAGS"
+            cd ~ && makepkg -s --noconfirm
+          '
 
       # -------------------------
       # Prepare release
@@ -100,7 +114,7 @@ jobs:
           VERSION=$(echo "$PKG_FILE" | sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
           NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
 
-          mkdir release
+          mkdir -p release
           cp "$PKG_PATH" "release/$NEW_NAME"
 
           echo "version=$VERSION" >> $GITHUB_OUTPUT
