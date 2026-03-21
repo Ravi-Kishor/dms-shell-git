@@ -15,107 +15,85 @@ jobs:
       image: archlinux:latest
 
     steps:
-      # -------------------------
-      # Update system
-      # -------------------------
-      - name: Update base system
+      # 1. Prepare Environment & Permissions
+      - name: System setup
         run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel git sudo curl go quickshell
-
-      # -------------------------
-      # Create builder user
-      # -------------------------
-      - name: Create builder user
-        run: |
+          pacman -Syu --noconfirm --needed base-devel git sudo go quickshell
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          # Allow the builder to write to the current workspace
+          chown -R builder:builder .
 
-      # -------------------------
-      # Create PKGBUILD
-      # -------------------------
+      # 2. Checkout (as builder to avoid permission headaches later)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 3. Create PKGBUILD
       - name: Create PKGBUILD
+        shell: bash
         run: |
-          cat > /home/builder/PKGBUILD << 'EOF'
-pkgname=dms-shell-git
-pkgver=0.0.0
-pkgrel=1
-pkgdesc="Dank Material Shell (git, GOAMD64=v3 optimized)"
-arch=(x86_64)
-url="https://github.com/AvengeMedia/DankMaterialShell"
-license=(GPL-3.0-or-later)
+          sudo -u builder bash << 'EOF'
+          cat > PKGBUILD << 'INNER_EOF'
+          pkgname=dms-shell-git
+          pkgver=0.0.0
+          pkgrel=1
+          pkgdesc="Dank Material Shell (git, GOAMD64=v3 optimized)"
+          arch=(x86_64)
+          url="https://github.com/AvengeMedia/DankMaterialShell"
+          license=(GPL-3.0-or-later)
+          depends=(quickshell)
+          makedepends=(git go)
+          provides=(dms-shell dms-git)
+          conflicts=(dms-shell dms-git)
+          source=("git+$url.git")
+          sha256sums=('SKIP')
 
-depends=(quickshell)
-makedepends=(git go)
+          pkgver() {
+            cd DankMaterialShell
+            git describe --long --tags --abbrev=7 2>/dev/null | sed 's/^v//;s/-/.r/;s/-/./' || \
+            printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+          }
 
-provides=(dms-shell dms-git)
-conflicts=(dms-shell dms-git)
+          build() {
+            cd DankMaterialShell/core
+            export GOAMD64=v3
+            export CGO_ENABLED=1
+            export GOFLAGS="-buildvcs=false -trimpath"
+            go build -o bin/dms
+          }
 
-source=("git+$url.git")
-sha256sums=('SKIP')
+          package() {
+            cd DankMaterialShell
+            install -Dm755 core/bin/dms "$pkgdir/usr/bin/dms"
+            install -dm755 "$pkgdir/usr/share/quickshell/dms"
+            cp -r quickshell/* "$pkgdir/usr/share/quickshell/dms/"
+          }
+          INNER_EOF
+          EOF
 
-pkgver() {
-  cd DankMaterialShell
-  git describe --long --tags --abbrev=7 2>/dev/null \
-    | sed 's/^v//;s/-/.r/;s/-/./' || \
-    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-}
-
-build() {
-  cd DankMaterialShell/core
-
-  # HARD enforce Go optimization
-  export GOAMD64=v3
-  export CGO_ENABLED=1
-  export GOFLAGS="-buildvcs=false -trimpath"
-
-  # Build directly (no Makefile risk)
-  go build -o bin/dms
-}
-
-package() {
-  cd DankMaterialShell
-
-  install -Dm755 core/bin/dms "$pkgdir/usr/bin/dms"
-
-  install -dm755 "$pkgdir/usr/share/quickshell/dms"
-  cp -r quickshell/* "$pkgdir/usr/share/quickshell/dms/"
-}
-EOF
-
-          chown -R builder:builder /home/builder
-
-      # -------------------------
-      # Build package
-      # -------------------------
+      # 4. Build package
       - name: Build dms-shell-git
         run: |
-          su builder -c '
-            export MAKEFLAGS="-j$(nproc)"
-            export GOAMD64=v3
-            cd ~ && makepkg -s --noconfirm --clean --cleanbuild
-          '
+          sudo -u builder bash -c 'export MAKEFLAGS="-j$(nproc)" && makepkg -s --noconfirm'
 
-      # -------------------------
-      # Prepare release
-      # -------------------------
+      # 5. Prepare Release Artifacts
       - name: Prepare release
         id: pkg
         run: |
-          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "dms-shell-git-*-x86_64.pkg.tar.zst" ! -name "*debug*")
-          PKG_FILE=$(basename "$PKG_PATH")
-
-          VERSION=$(echo "$PKG_FILE" | sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
+          # Find the built package
+          PKG_PATH=$(ls dms-shell-git-*-x86_64.pkg.tar.zst | grep -v "debug" | head -n 1)
+          
+          # Extract version for the Tag
+          VERSION=$(echo "$PKG_PATH" | sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
+          
+          # Rename to include v3 suffix
           NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
-
-          mkdir -p release
-          cp "$PKG_PATH" "release/$NEW_NAME"
-
+          mv "$PKG_PATH" "$NEW_NAME"
+          
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "pkg_name=$NEW_NAME" >> $GITHUB_OUTPUT
 
-      # -------------------------
-      # Create GitHub Release
-      # -------------------------
+      # 6. Create GitHub Release
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -123,8 +101,9 @@ EOF
           name: dms-shell-git ${{ steps.pkg.outputs.version }} (x86-64-v3)
           body: |
             Built with:
-            - GOAMD64=v3 (AVX2, BMI2, FMA enabled)
-            - Clean reproducible build
-          files: release/*.pkg.tar.zst
+            - `GOAMD64=v3` (AVX2, BMI2, FMA enabled)
+            - Automated clean build
+          files: |
+            ${{ steps.pkg.outputs.pkg_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
