@@ -61,18 +61,19 @@ jobs:
               printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
           }
 
+          prepare() {
+            cd DankMaterialShell
+            git submodule update --init --recursive
+          }
+
           build() {
             cd DankMaterialShell/core
 
-            # Go optimization (safe)
             export GOAMD64=v3
             export CGO_ENABLED=1
 
-            # Zen 3 optimization (aggressive but stable)
             export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
             export CXXFLAGS="$CFLAGS"
-
-            # Linker optimization
             export LDFLAGS="-Wl,-O1,--as-needed"
 
             make
@@ -101,7 +102,8 @@ jobs:
             export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
             export CXXFLAGS="$CFLAGS"
             export LDFLAGS="-Wl,-O1,--as-needed"
-            cd ~ && makepkg -s --noconfirm
+            cd ~
+            makepkg -s --noconfirm
           '
 
       # -------------------------
@@ -119,7 +121,7 @@ jobs:
           mkdir -p release
           cp "$PKG_PATH" "release/$NEW_NAME"
 
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # -------------------------
       # Create GitHub Release
