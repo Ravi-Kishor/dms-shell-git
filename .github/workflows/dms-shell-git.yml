@@ -91,12 +91,11 @@ jobs:
 
               export GOAMD64=v3
               export CGO_ENABLED=1
-              export GOFLAGS="-trimpath -ldflags=-s -ldflags=-w"
+              export GOFLAGS="-trimpath"
 
               export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
               export CXXFLAGS="$CFLAGS"
               export LDFLAGS="-Wl,-O1,--as-needed"
-
               export MAKEFLAGS="-j$(nproc)"
 
               make
