@@ -48,23 +48,16 @@ jobs:
           pkgname=dms-shell-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Dank Material Shell (Git, Zen3/x86-64-v3)"
+          pkgdesc="Dank Material Shell (Git, GOAMD64=v3)"
           arch=('x86_64')
           url="https://github.com/AvengeMedia/DankMaterialShell"
           license=('GPL-3.0-or-later')
 
-          depends=(
-            quickshell
-          )
+          depends=(quickshell)
+          makedepends=(git make go)
 
-          makedepends=(
-            git
-            go
-            make
-          )
-
-          provides=(dms-shell)
-          conflicts=(dms-shell)
+          provides=(dms-shell dms-git)
+          conflicts=(dms-shell dms-git)
 
           source=("git+$url.git")
           sha256sums=('SKIP')
@@ -91,12 +84,10 @@ jobs:
 
               export GOAMD64=v3
               export CGO_ENABLED=1
-              export GOFLAGS="-trimpath"
 
               export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
               export CXXFLAGS="$CFLAGS"
               export LDFLAGS="-Wl,-O1,--as-needed"
-              export MAKEFLAGS="-j$(nproc)"
 
               make
           }
@@ -104,8 +95,7 @@ jobs:
           package() {
               cd DankMaterialShell
 
-              install -Dm755 \
-                  core/bin/dms \
+              install -Dm755 core/bin/dms \
                   "$pkgdir/usr/bin/dms"
 
               install -dm755 \
@@ -124,6 +114,7 @@ jobs:
       - name: Build package
         run: |
           su builder -c '
+            export MAKEFLAGS="-j$(nproc)"
             cd ~
             makepkg -s --cleanbuild --noconfirm
           '
@@ -157,7 +148,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.version }}-v3
-          name: dms-shell-git ${{ steps.pkg.outputs.version }} (Zen3/x86-64-v3)
+          name: dms-shell-git ${{ steps.pkg.outputs.version }} (GOAMD64=v3)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
