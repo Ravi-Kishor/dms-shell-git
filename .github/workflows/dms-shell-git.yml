@@ -11,6 +11,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     container:
       image: archlinux:latest
 
@@ -21,7 +22,14 @@ jobs:
       - name: Update base system
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel git sudo curl go quickshell
+          pacman -S --needed --noconfirm \
+            base-devel \
+            git \
+            sudo \
+            curl \
+            go \
+            make \
+            quickshell
 
       # -------------------------
       # Create builder user
@@ -36,56 +44,76 @@ jobs:
       # -------------------------
       - name: Create PKGBUILD
         run: |
-          cat > /home/builder/PKGBUILD << 'EOF'
+          cat > /home/builder/PKGBUILD <<'EOF'
           pkgname=dms-shell-git
-          pkgver=0.0.0
+          pkgver=0
           pkgrel=1
-          pkgdesc="Dank Material Shell (git, GOAMD64=v3)"
-          arch=(x86_64)
+          pkgdesc="Dank Material Shell (Git, Zen3/x86-64-v3)"
+          arch=('x86_64')
           url="https://github.com/AvengeMedia/DankMaterialShell"
-          license=(GPL-3.0-or-later)
+          license=('GPL-3.0-or-later')
 
-          depends=(quickshell)
-          makedepends=(git make go)
+          depends=(
+            quickshell
+          )
 
-          provides=(dms-shell dms-git)
-          conflicts=(dms-shell dms-git)
+          makedepends=(
+            git
+            go
+            make
+          )
+
+          provides=(dms-shell)
+          conflicts=(dms-shell)
 
           source=("git+$url.git")
           sha256sums=('SKIP')
 
           pkgver() {
-            cd DankMaterialShell
-            git describe --long --tags --abbrev=7 2>/dev/null \
-              | sed 's/^v//;s/-/.r/;s/-/./' || \
-              printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+              cd DankMaterialShell
+
+              if git describe --tags --long >/dev/null 2>&1; then
+                  git describe --tags --long | sed 's/^v//; s/-/./g'
+              else
+                  printf "r%s.%s" \
+                      "$(git rev-list --count HEAD)" \
+                      "$(git rev-parse --short HEAD)"
+              fi
           }
 
           prepare() {
-            cd DankMaterialShell
-            git submodule update --init --recursive
+              cd DankMaterialShell
+              git submodule update --init --recursive
           }
 
           build() {
-            cd DankMaterialShell/core
+              cd DankMaterialShell/core
 
-            export GOAMD64=v3
-            export CGO_ENABLED=1
+              export GOAMD64=v3
+              export CGO_ENABLED=1
+              export GOFLAGS="-trimpath -ldflags=-s -ldflags=-w"
 
-            export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
-            export CXXFLAGS="$CFLAGS"
-            export LDFLAGS="-Wl,-O1,--as-needed"
+              export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
+              export CXXFLAGS="$CFLAGS"
+              export LDFLAGS="-Wl,-O1,--as-needed"
 
-            make
+              export MAKEFLAGS="-j$(nproc)"
+
+              make
           }
 
           package() {
-            cd DankMaterialShell
+              cd DankMaterialShell
 
-            install -Dm755 core/bin/dms "$pkgdir/usr/bin/dms"
+              install -Dm755 \
+                  core/bin/dms \
+                  "$pkgdir/usr/bin/dms"
 
-            install -dm755 "$pkgdir/usr/share/quickshell/dms"
-            cp -r quickshell/* "$pkgdir/usr/share/quickshell/dms/"
+              install -dm755 \
+                  "$pkgdir/usr/share/quickshell/dms"
+
+              cp -a quickshell/. \
+                  "$pkgdir/usr/share/quickshell/dms/"
           }
           EOF
 
@@ -94,16 +122,11 @@ jobs:
       # -------------------------
       # Build package
       # -------------------------
-      - name: Build dms-shell-git
+      - name: Build package
         run: |
           su builder -c '
-            export MAKEFLAGS="-j$(nproc)"
-            export GOAMD64=v3
-            export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
-            export CXXFLAGS="$CFLAGS"
-            export LDFLAGS="-Wl,-O1,--as-needed"
             cd ~
-            makepkg -s --noconfirm
+            makepkg -s --cleanbuild --noconfirm
           '
 
       # -------------------------
@@ -112,10 +135,15 @@ jobs:
       - name: Prepare release
         id: pkg
         run: |
-          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "dms-shell-git-*-x86_64.pkg.tar.zst" ! -name "*debug*")
+          PKG_PATH=$(find /home/builder -maxdepth 1 -type f \
+            -name "dms-shell-git-*-x86_64.pkg.tar.zst" \
+            ! -name "*debug*" | head -n1)
+
           PKG_FILE=$(basename "$PKG_PATH")
 
-          VERSION=$(echo "$PKG_FILE" | sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
+          VERSION=$(echo "$PKG_FILE" | \
+            sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
+
           NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
 
           mkdir -p release
@@ -130,7 +158,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.version }}-v3
-          name: dms-shell-git ${{ steps.pkg.outputs.version }} (GOAMD64=v3)
+          name: dms-shell-git ${{ steps.pkg.outputs.version }} (Zen3/x86-64-v3)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
