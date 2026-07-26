@@ -8,7 +8,7 @@ No manual builds.
 
 ---
 
-## 📦 Package
+##  Package
 
 | Package | Description |
 |----------|------------|
@@ -23,7 +23,7 @@ Builds include:
 
 ---
 
-# 🚀 Install / Update
+#  Install / Update
 
 ```bash
 curl -fLO https://raw.githubusercontent.com/Ravi-Kishor/dms-shell-git/main/update-dms
@@ -34,7 +34,7 @@ update-dms
 
 ---
 
-## 🧠 What the updater does
+##  What the updater does
 
 - Checks installed version via pacman
 - Fetches latest GitHub release
@@ -66,7 +66,7 @@ For customization, copy files to:
 
 ---
 
-## ⚠ Requirements
+##  Requirements
 
 Arch Linux only.
 
