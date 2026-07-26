@@ -48,7 +48,7 @@ Interactive mode:
 
 ---
 
-## 🏗 Build Info
+##  Build Info
 
 - Built inside Arch container
 - Stripped binaries
