@@ -1,0 +1,69 @@
+name: Build Arch Packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "electron30-bin/**"
+      - "ytdownloader-gui-bin/**"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.package }}
+    runs-on: ubuntu-latest
+
+    container:
+      image: archlinux:latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - electron30-bin
+          - ytdownloader-gui-bin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm
+
+          pacman -S --noconfirm \
+            base-devel \
+            git \
+            sudo \
+            unzip \
+            rpmextract \
+            libarchive \
+            nodejs \
+            wget
+
+      - name: Create build user
+        run: |
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >/etc/sudoers.d/builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build package
+        run: |
+          sudo -u builder bash <<EOF
+          cd "$GITHUB_WORKSPACE/${{ matrix.package }}"
+          makepkg -s --noconfirm --cleanbuild
+          EOF
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: |
+            ${{ matrix.package }}/*.pkg.tar.zst
+            ${{ matrix.package }}/*.pkg.tar.zst.sig
+          if-no-files-found: error
