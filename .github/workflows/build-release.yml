@@ -10,6 +10,7 @@ on:
 
 jobs:
   build:
+    name: Build DMS x86-64-v3 / Zen 3
     runs-on: ubuntu-latest
 
     container:
@@ -49,21 +50,23 @@ jobs:
           pkgname=dms-shell-git
           pkgver=0
           pkgrel=1
+
           pkgdesc="Dank Material Shell (Git, x86-64-v3, Zen 3)"
           arch=('x86_64')
+
           url="https://github.com/AvengeMedia/DankMaterialShell"
           license=('MIT')
 
           depends=(
-            quickshell
             dgop
+            quickshell
             accountsservice
           )
 
           makedepends=(
             git
-            make
             go
+            make
           )
 
           optdepends=(
@@ -115,19 +118,28 @@ jobs:
           build() {
               cd DankMaterialShell/core
 
-              # ---------------------------------
-              # Go CPU target
-              # ---------------------------------
+              # =================================
+              # CPU / Go target
+              # =================================
+
+              # x86-64-v3 baseline for Go.
               export GOAMD64=v3
 
-              # ---------------------------------
-              # Enable CGO
-              # ---------------------------------
+              # =================================
+              # CGO
+              # =================================
+
+              # Upstream Makefile forces CGO_ENABLED=0
+              # for its normal "make" target.
+              #
+              # We intentionally bypass that target and
+              # invoke go build directly, like Chaotic AUR.
               export CGO_ENABLED=1
 
-              # ---------------------------------
-              # Zen 3 optimization
-              # ---------------------------------
+              # =================================
+              # Zen 3 C/C++ optimization
+              # =================================
+
               export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
               export CXXFLAGS="$CFLAGS"
               export CPPFLAGS="$CFLAGS"
@@ -139,42 +151,36 @@ jobs:
               export CGO_CXXFLAGS="$CXXFLAGS"
               export CGO_LDFLAGS="$LDFLAGS"
 
-              # ---------------------------------
-              # Version / build metadata
-              # ---------------------------------
+              # =================================
+              # Build metadata
+              # =================================
+
               VERSION="$(git describe --tags --always 2>/dev/null || echo dev)"
               BUILD_TIME="$(date -u '+%Y-%m-%d_%H:%M:%S')"
               COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-              # ---------------------------------
+              # =================================
               # Go linker flags
-              # ---------------------------------
+              # =================================
+
               LDFLAGS_GO="-s -w \
                 -X main.Version=${VERSION} \
                 -X main.buildTime=${BUILD_TIME} \
                 -X main.commit=${COMMIT} \
                 -linkmode=external"
 
-              # ---------------------------------
-              # Prepare embedded Quickshell UI
-              # ---------------------------------
+              # =================================
+              # Embed Quickshell UI
+              # =================================
+
               make sync-shell
 
-              # ---------------------------------
-              # Go build flags
-              # ---------------------------------
+              # =================================
+              # Go build
+              # =================================
+
               GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
 
-              # ---------------------------------
-              # Build DMS directly.
-              #
-              # We intentionally do NOT use:
-              #
-              #   make
-              #
-              # because the upstream Makefile forces
-              # CGO_ENABLED=0.
-              # ---------------------------------
               go build \
                 -tags 'distro_binary withshell' \
                 -ldflags "$LDFLAGS_GO" \
@@ -212,102 +218,131 @@ jobs:
           '
 
       # -------------------------
-      # Verify DMS binary
+      # Verify the actual pkgdir
       # -------------------------
-      - name: Verify DMS binary
+      #
+      # IMPORTANT:
+      # We intentionally verify:
+      #
+      #   /home/builder/pkg/dms-shell-git/usr/bin/dms
+      #
+      # directly.
+      #
+      # There is NO tar extraction here.
+      # -------------------------
+      - name: VERIFY DMS x86-64-v3 PIE
         run: |
           set -e
 
           DMS="/home/builder/pkg/dms-shell-git/usr/bin/dms"
 
-          echo "========================================"
-          echo "DMS binary verification"
-          echo "========================================"
+          echo "=========================================="
+          echo "DMS BUILD VERIFICATION"
+          echo "=========================================="
+          echo
 
           if [ ! -f "$DMS" ]; then
             echo "ERROR: DMS binary not found:"
             echo "$DMS"
             echo
-            echo "Contents of /home/builder/pkg:"
-            find /home/builder/pkg -maxdepth 4 -print || true
+            echo "Available files:"
+            find /home/builder/pkg -maxdepth 5 -type f -print || true
             exit 1
           fi
 
+          echo "Binary:"
+          echo "$DMS"
           echo
-          echo "===== file ====="
-          file "$DMS"
 
+          echo "===== FILE ====="
+          file "$DMS"
           echo
-          echo "===== ELF ====="
+
+          echo "===== ELF HEADER ====="
           readelf -h "$DMS" | \
             grep -E 'Class:|Machine:|Type:'
-
           echo
-          echo "===== Dynamic dependencies ====="
+
+          echo "===== DYNAMIC DEPENDENCIES ====="
           readelf -d "$DMS" | \
             grep NEEDED || true
-
           echo
-          echo "===== Go build information ====="
+
+          echo "===== GO BUILD INFO ====="
           go version -m "$DMS" || true
-
           echo
+
           echo "===== SHA256 ====="
           sha256sum "$DMS"
-
           echo
-          echo "===== Size ====="
+
+          echo "===== SIZE ====="
           ls -lh "$DMS"
-
           echo
-          echo "========================================"
-          echo "Verification complete"
-          echo "========================================"
+
+          echo "=========================================="
+          echo "VERIFICATION PASSED"
+          echo "=========================================="
 
       # -------------------------
-      # Prepare release
+      # Locate finished package
       # -------------------------
-      - name: Prepare release
+      - name: Locate package
         id: pkg
         run: |
           set -e
 
-          PKG_PATH=$(find /home/builder/pkg \
-            -maxdepth 1 \
-            -type f \
-            -name "dms-shell-git-*-x86_64.pkg.tar.zst" \
-            ! -name "*debug*" \
-            -print \
-            | head -n1)
+          PKG_PATH=""
+
+          for f in /home/builder/*.pkg.tar.zst; do
+            [ -f "$f" ] || continue
+
+            case "$(basename "$f")" in
+              *-debug-*.pkg.tar.zst)
+                continue
+                ;;
+              dms-shell-git-*.pkg.tar.zst)
+                PKG_PATH="$f"
+                break
+                ;;
+            esac
+          done
 
           if [ -z "$PKG_PATH" ]; then
             echo "ERROR: Main package not found."
 
             echo
-            echo "Available packages:"
-            find /home/builder/pkg \
-              -maxdepth 1 \
-              -type f \
-              -name "*.pkg.tar.zst" \
-              -print
+            echo "Files in /home/builder:"
+            find /home/builder -maxdepth 1 -type f -print
 
             exit 1
           fi
 
           PKG_FILE="$(basename "$PKG_PATH")"
 
-          VERSION="$(echo "$PKG_FILE" | \
-            sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')"
+          VERSION="$(
+            echo "$PKG_FILE" |
+              sed -E \
+                's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/'
+          )"
 
           NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
 
-          mkdir -p release
+          mkdir -p /home/builder/release
 
-          cp "$PKG_PATH" "release/$NEW_NAME"
+          cp "$PKG_PATH" \
+            "/home/builder/release/$NEW_NAME"
 
-          echo "Package: $PKG_FILE"
-          echo "Release: $NEW_NAME"
-          echo "Version: $VERSION"
+          echo "Main package:"
+          echo "$PKG_PATH"
+
+          echo
+          echo "Release package:"
+          echo "/home/builder/release/$NEW_NAME"
+
+          echo
+          echo "Version:"
+          echo "$VERSION"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -319,6 +354,6 @@ jobs:
         with:
           tag_name: ${{ steps.pkg.outputs.version }}-v3
           name: dms-shell-git ${{ steps.pkg.outputs.version }} (x86-64-v3 / Zen 3)
-          files: release/*.pkg.tar.zst
+          files: /home/builder/release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
