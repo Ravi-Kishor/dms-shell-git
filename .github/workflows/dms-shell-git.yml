@@ -48,16 +48,43 @@ jobs:
           pkgname=dms-shell-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Dank Material Shell (Git, GOAMD64=v3)"
+          pkgdesc="Dank Material Shell (Git, x86-64-v3, Zen 3)"
           arch=('x86_64')
           url="https://github.com/AvengeMedia/DankMaterialShell"
-          license=('GPL-3.0-or-later')
+          license=('MIT')
 
-          depends=(quickshell)
-          makedepends=(git make go)
+          depends=(
+            quickshell
+            dgop
+            accountsservice
+          )
 
-          provides=(dms-shell dms-git)
-          conflicts=(dms-shell dms-git)
+          makedepends=(
+            git
+            make
+            go
+          )
+
+          optdepends=(
+            'cava: Audio visualizer'
+            'i2c-tools: External monitor brightness control'
+            'matugen: Dynamic wallpaper-based theming'
+            'qt6-multimedia: Sound effect support'
+            'power-profiles-daemon: Set power profile'
+            'qt6ct: Qt6 application theming'
+            'cups-pk-helper: Printer Management'
+            'greetd-dms-greeter: DMS Greeter'
+          )
+
+          provides=(
+            dms-shell
+            dms-git
+          )
+
+          conflicts=(
+            dms-shell
+            dms-git
+          )
 
           source=("git+$url.git")
           sha256sums=('SKIP')
@@ -65,44 +92,107 @@ jobs:
           pkgver() {
               cd DankMaterialShell
 
-              if git describe --tags --long >/dev/null 2>&1; then
-                  git describe --tags --long | sed 's/^v//; s/-/./g'
-              else
-                  printf "r%s.%s" \
-                      "$(git rev-list --count HEAD)" \
-                      "$(git rev-parse --short HEAD)"
-              fi
+              git describe --long --tags --abbrev=7 --match="v*" HEAD 2>/dev/null \
+                | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
+                || echo "0.0.0.r0.$(git rev-parse --short=7 HEAD)"
           }
 
           prepare() {
               cd DankMaterialShell
-              git submodule update --init --recursive
+
+              if [ -f .gitmodules ]; then
+                  git submodule sync
+                  git submodule update --init --recursive
+              fi
           }
 
           build() {
               cd DankMaterialShell/core
 
+              # ---------------------------------
+              # CPU / Go architecture
+              # ---------------------------------
               export GOAMD64=v3
+
+              # Chaotic AUR uses CGO and external linking.
+              # This intentionally avoids the upstream Makefile's
+              # CGO_ENABLED=0 build target.
               export CGO_ENABLED=1
 
+              # ---------------------------------
+              # Zen 3 optimization
+              # ---------------------------------
               export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
               export CXXFLAGS="$CFLAGS"
+              export CPPFLAGS="$CFLAGS"
               export LDFLAGS="-Wl,-O1,--as-needed"
 
-              make
+              export CGO_CPPFLAGS="$CPPFLAGS"
+              export CGO_CFLAGS="$CFLAGS"
+              export CGO_CXXFLAGS="$CXXFLAGS"
+              export CGO_LDFLAGS="$LDFLAGS"
+
+              # ---------------------------------
+              # Version information
+              # ---------------------------------
+              VERSION="$(git describe --tags --always 2>/dev/null || echo dev)"
+              BUILD_TIME="$(date -u '+%Y-%m-%d_%H:%M:%S')"
+              COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+              # ---------------------------------
+              # Go linker flags
+              # ---------------------------------
+              LDFLAGS_GO="-s -w \
+                -X main.Version=${VERSION} \
+                -X main.buildTime=${BUILD_TIME} \
+                -X main.commit=${COMMIT} \
+                -linkmode=external"
+
+              # ---------------------------------
+              # Prepare embedded Quickshell UI
+              # ---------------------------------
+              make sync-shell
+
+              # ---------------------------------
+              # Build DMS
+              #
+              # -buildmode=pie:
+              #   Produce a PIE executable.
+              #
+              # -linkmode=external:
+              #   Use the system external linker.
+              #
+              # -trimpath:
+              #   Remove local build paths.
+              #
+              # distro_binary:
+              #   Build the distro variant.
+              #
+              # withshell:
+              #   Embed the Quickshell UI.
+              # ---------------------------------
+              GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
+
+              go build \
+                -tags 'distro_binary withshell' \
+                -ldflags "$LDFLAGS_GO" \
+                $GOFLAGS \
+                -o dms \
+                ./cmd/dms
           }
 
           package() {
               cd DankMaterialShell
 
-              install -Dm755 core/bin/dms \
-                  "$pkgdir/usr/bin/dms"
+              install -Dm0755 \
+                core/dms \
+                "$pkgdir/usr/bin/dms"
 
-              install -dm755 \
-                  "$pkgdir/usr/share/quickshell/dms"
+              install -dm0755 \
+                "$pkgdir/usr/share/quickshell/dms"
 
               cp -a quickshell/. \
-                  "$pkgdir/usr/share/quickshell/dms/"
+                "$pkgdir/usr/share/quickshell/dms/"
           }
           EOF
 
@@ -120,6 +210,45 @@ jobs:
           '
 
       # -------------------------
+      # Verify binary
+      # -------------------------
+      - name: Verify DMS binary
+        run: |
+          PKG_PATH=$(find /home/builder -maxdepth 1 -type f \
+            -name "dms-shell-git-*-x86_64.pkg.tar.zst" \
+            ! -name "*debug*" | head -n1)
+
+          mkdir -p verify
+          tar -I zstd -xf "$PKG_PATH" \
+            -C verify \
+            ./usr/bin/dms
+
+          echo "===== file ====="
+          file verify/usr/bin/dms
+
+          echo
+          echo "===== ELF header ====="
+          readelf -h verify/usr/bin/dms | \
+            grep -E 'Class:|Machine:|Type:'
+
+          echo
+          echo "===== Dynamic dependencies ====="
+          readelf -d verify/usr/bin/dms | \
+            grep NEEDED || true
+
+          echo
+          echo "===== Go build information ====="
+          go version -m verify/usr/bin/dms || true
+
+          echo
+          echo "===== SHA256 ====="
+          sha256sum verify/usr/bin/dms
+
+          echo
+          echo "===== Size ====="
+          ls -lh verify/usr/bin/dms
+
+      # -------------------------
       # Prepare release
       # -------------------------
       - name: Prepare release
@@ -128,6 +257,11 @@ jobs:
           PKG_PATH=$(find /home/builder -maxdepth 1 -type f \
             -name "dms-shell-git-*-x86_64.pkg.tar.zst" \
             ! -name "*debug*" | head -n1)
+
+          if [ -z "$PKG_PATH" ]; then
+            echo "ERROR: Package not found"
+            exit 1
+          fi
 
           PKG_FILE=$(basename "$PKG_PATH")
 
@@ -148,7 +282,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.version }}-v3
-          name: dms-shell-git ${{ steps.pkg.outputs.version }} (GOAMD64=v3)
+          name: dms-shell-git ${{ steps.pkg.outputs.version }} (x86-64-v3 / Zen 3)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
