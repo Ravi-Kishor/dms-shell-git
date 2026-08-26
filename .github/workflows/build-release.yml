@@ -93,7 +93,12 @@ jobs:
           pkgver() {
               cd DankMaterialShell
 
-              git describe --long --tags --abbrev=7 --match="v*" HEAD 2>/dev/null \
+              git describe \
+                --long \
+                --tags \
+                --abbrev=7 \
+                --match="v*" \
+                HEAD 2>/dev/null \
                 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
                 || echo "0.0.0.r0.$(git rev-parse --short=7 HEAD)"
           }
@@ -111,21 +116,17 @@ jobs:
               cd DankMaterialShell/core
 
               # ---------------------------------
-              # Go CPU baseline
+              # Go CPU target
               # ---------------------------------
               export GOAMD64=v3
 
               # ---------------------------------
               # Enable CGO
-              #
-              # Upstream Makefile forces CGO_ENABLED=0.
-              # We bypass that build target and invoke go
-              # directly, following the Chaotic AUR approach.
               # ---------------------------------
               export CGO_ENABLED=1
 
               # ---------------------------------
-              # Zen 3 optimization for CGO/C/C++
+              # Zen 3 optimization
               # ---------------------------------
               export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
               export CXXFLAGS="$CFLAGS"
@@ -139,7 +140,7 @@ jobs:
               export CGO_LDFLAGS="$LDFLAGS"
 
               # ---------------------------------
-              # Version/build metadata
+              # Version / build metadata
               # ---------------------------------
               VERSION="$(git describe --tags --always 2>/dev/null || echo dev)"
               BUILD_TIME="$(date -u '+%Y-%m-%d_%H:%M:%S')"
@@ -165,7 +166,14 @@ jobs:
               GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
 
               # ---------------------------------
-              # Build DMS
+              # Build DMS directly.
+              #
+              # We intentionally do NOT use:
+              #
+              #   make
+              #
+              # because the upstream Makefile forces
+              # CGO_ENABLED=0.
               # ---------------------------------
               go build \
                 -tags 'distro_binary withshell' \
@@ -199,36 +207,38 @@ jobs:
         run: |
           su builder -c '
             export MAKEFLAGS="-j$(nproc)"
-            cd ~
+            cd /home/builder
             makepkg -s --cleanbuild --noconfirm
           '
 
       # -------------------------
-      # Verify binary
+      # Verify DMS binary
       # -------------------------
       - name: Verify DMS binary
         run: |
+          set -e
+
           DMS="/home/builder/pkg/dms-shell-git/usr/bin/dms"
+
+          echo "========================================"
+          echo "DMS binary verification"
+          echo "========================================"
 
           if [ ! -f "$DMS" ]; then
             echo "ERROR: DMS binary not found:"
             echo "$DMS"
             echo
-            echo "Package contents:"
-            find /home/builder/pkg/dms-shell-git -maxdepth 4 -type f -print || true
+            echo "Contents of /home/builder/pkg:"
+            find /home/builder/pkg -maxdepth 4 -print || true
             exit 1
           fi
-
-          echo "========================================"
-          echo "DMS binary verification"
-          echo "========================================"
 
           echo
           echo "===== file ====="
           file "$DMS"
 
           echo
-          echo "===== ELF header ====="
+          echo "===== ELF ====="
           readelf -h "$DMS" | \
             grep -E 'Class:|Machine:|Type:'
 
@@ -249,36 +259,50 @@ jobs:
           echo "===== Size ====="
           ls -lh "$DMS"
 
+          echo
+          echo "========================================"
+          echo "Verification complete"
+          echo "========================================"
+
       # -------------------------
       # Prepare release
       # -------------------------
       - name: Prepare release
         id: pkg
         run: |
-          PKG_PATH=$(find /home/builder/pkg -maxdepth 1 -type f \
+          set -e
+
+          PKG_PATH=$(find /home/builder/pkg \
+            -maxdepth 1 \
+            -type f \
             -name "dms-shell-git-*-x86_64.pkg.tar.zst" \
             ! -name "*debug*" \
+            -print \
             | head -n1)
 
           if [ -z "$PKG_PATH" ]; then
-            echo "ERROR: Main package not found"
+            echo "ERROR: Main package not found."
+
             echo
             echo "Available packages:"
-            find /home/builder/pkg -maxdepth 1 \
+            find /home/builder/pkg \
+              -maxdepth 1 \
               -type f \
               -name "*.pkg.tar.zst" \
               -print
+
             exit 1
           fi
 
-          PKG_FILE=$(basename "$PKG_PATH")
+          PKG_FILE="$(basename "$PKG_PATH")"
 
-          VERSION=$(echo "$PKG_FILE" | \
-            sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
+          VERSION="$(echo "$PKG_FILE" | \
+            sed -E 's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')"
 
           NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
 
           mkdir -p release
+
           cp "$PKG_PATH" "release/$NEW_NAME"
 
           echo "Package: $PKG_FILE"
