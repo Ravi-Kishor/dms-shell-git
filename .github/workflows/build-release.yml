@@ -46,22 +46,14 @@ jobs:
         run: |
           useradd -m builder
 
-          echo "builder ALL=(ALL) NOPASSWD: ALL" \
-            >> /etc/sudoers
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
           mkdir -p /home/builder/dms-build
+
           chown -R builder:builder /home/builder
 
       # ============================================================
-      # Generate PKGBUILD
-      #
-      # Everything lives directly in:
-      #
-      # /home/builder/dms-build/
-      #
-      # exactly like:
-      #
-      # ~/dms-build/
+      # PKGBUILD
       # ============================================================
 
       - name: Generate PKGBUILD
@@ -149,10 +141,7 @@ jobs:
           build() {
               cd DankMaterialShell/core
 
-              # ==================================================
               # AMD Zen 3 / x86-64-v3
-              # ==================================================
-
               export GOAMD64=v3
               export CGO_ENABLED=1
 
@@ -182,7 +171,6 @@ jobs:
           -X main.commit=${COMMIT} \
           -linkmode=external"
 
-              # Embed Quickshell UI into dms.
               make sync-shell
 
               GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
@@ -197,32 +185,26 @@ jobs:
 
           package() {
 
-              # Main binary
               install -Dm0755 \
                   DankMaterialShell/core/dms \
                   "$pkgdir/usr/bin/dms"
 
-              # Systemd
               install -Dm0644 \
                   DankMaterialShell/assets/systemd/dms.service \
                   "$pkgdir/usr/lib/systemd/user/dms.service"
 
-              # Bash completion
               install -Dm0644 \
                   "$srcdir/completion.bash" \
                   "$pkgdir/usr/share/bash-completion/completions/dms"
 
-              # Fish completion
               install -Dm0644 \
                   "$srcdir/completion.fish" \
                   "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish"
 
-              # Zsh completion
               install -Dm0644 \
                   "$srcdir/completion.zsh" \
                   "$pkgdir/usr/share/zsh/site-functions/_dms"
 
-              # Desktop files
               install -Dm0644 \
                   DankMaterialShell/assets/dms-open.desktop \
                   "$pkgdir/usr/share/applications/dms-open.desktop"
@@ -235,12 +217,10 @@ jobs:
                   DankMaterialShell/assets/com.danklinux.dms.notepad.desktop \
                   "$pkgdir/usr/share/applications/com.danklinux.dms.notepad.desktop"
 
-              # Icon
               install -Dm0644 \
                   DankMaterialShell/core/assets/danklogo.svg \
                   "$pkgdir/usr/share/icons/hicolor/scalable/apps/danklogo.svg"
 
-              # Documentation
               install -Dm0644 \
                   DankMaterialShell/README.md \
                   "$pkgdir/usr/share/doc/$pkgname/README.md"
@@ -257,7 +237,7 @@ jobs:
             /home/builder/dms-build/PKGBUILD
 
       # ============================================================
-      # Build
+      # Build Arch package
       # ============================================================
 
       - name: Build Arch package
@@ -286,56 +266,77 @@ jobs:
           BUILD_DIR="/home/builder/dms-build"
 
           echo "============================================================"
-          echo " BUILD DIRECTORY"
+          echo " ALL GENERATED PACKAGES"
           echo "============================================================"
 
-          ls -lah "$BUILD_DIR"
+          find "$BUILD_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.pkg.tar.zst' \
+            -printf '%f\n' \
+            | sort
 
-          # ========================================================
-          # Locate the MAIN package (never the -debug- package).
-          #
-          # NOTE: exclusion pattern is 'dms-shell-git-debug-*' (anchored
-          # to the actual debug package name prefix) rather than the
-          # looser '*-debug-*', so a future version string containing
-          # the word "debug" can never cause a false exclusion.
-          # ========================================================
+          # --------------------------------------------------------
+          # Select ONLY the main package.
+          # Never allow the debug package to be selected.
+          # --------------------------------------------------------
 
-          PKG_PATH="$(
+          mapfile -t PACKAGES < <(
             find "$BUILD_DIR" \
               -maxdepth 1 \
               -type f \
               -name 'dms-shell-git-*.pkg.tar.zst' \
               ! -name 'dms-shell-git-debug-*' \
-              -print -quit
-          )"
+              -print
+          )
 
-          if [[ -z "$PKG_PATH" ]]; then
+          if [[ "${#PACKAGES[@]}" -ne 1 ]]; then
             echo
-            echo "ERROR: No package found."
+            echo "ERROR: Expected exactly ONE main package."
+            echo "Found: ${#PACKAGES[@]}"
+
+            printf '%s\n' "${PACKAGES[@]:-}"
+
             exit 1
           fi
 
+          PKG_PATH="${PACKAGES[0]}"
+
           echo
           echo "============================================================"
-          echo " PACKAGE PATH RESOLVED"
+          echo " SELECTED PACKAGE"
           echo "============================================================"
 
-          echo "PKG_PATH = $PKG_PATH"
-          echo "basename = $(basename "$PKG_PATH")"
+          echo "$PKG_PATH"
+          echo "basename: $(basename "$PKG_PATH")"
 
-          # Hard safety net: refuse to continue if we somehow picked
-          # the debug package anyway.
-          if [[ "$(basename "$PKG_PATH")" == dms-shell-git-debug-* ]]; then
-            echo "ERROR: Picked the debug package by mistake!"
+          if [[ "$(basename "$PKG_PATH")" == *debug* ]]; then
+            echo "ERROR: DEBUG PACKAGE WAS SELECTED!"
             exit 1
           fi
 
+          # --------------------------------------------------------
+          # Confirm the main binary is actually inside it.
+          # --------------------------------------------------------
+
           echo
           echo "============================================================"
-          echo " PACKAGE"
+          echo " VERIFY PACKAGE CONTENTS"
           echo "============================================================"
 
-          ls -lh "$PKG_PATH"
+          if ! bsdtar -tf "$PKG_PATH" |
+              grep -qx 'usr/bin/dms'; then
+
+            echo "ERROR: usr/bin/dms is missing from main package."
+
+            echo
+            echo "Package contents:"
+            bsdtar -tf "$PKG_PATH"
+
+            exit 1
+          fi
+
+          echo "OK: usr/bin/dms exists."
 
           echo
           echo "============================================================"
@@ -346,21 +347,21 @@ jobs:
 
           echo
           echo "============================================================"
-          echo " PACKAGE FILE"
+          echo " PACKAGE SIZE"
+          echo "============================================================"
+
+          ls -lh "$PKG_PATH"
+
+          echo
+          echo "============================================================"
+          echo " PACKAGE FILE TYPE"
           echo "============================================================"
 
           file "$PKG_PATH"
 
-          echo
-          echo "============================================================"
-          echo " PACKAGE CONTENTS"
-          echo "============================================================"
-
-          bsdtar -tf "$PKG_PATH"
-
-          # ========================================================
-          # Make sure Quickshell isn't separately installed.
-          # ========================================================
+          # --------------------------------------------------------
+          # Ensure Quickshell UI isn't separately packaged.
+          # --------------------------------------------------------
 
           echo
           echo "============================================================"
@@ -370,15 +371,19 @@ jobs:
           if bsdtar -tf "$PKG_PATH" |
               grep -q '^usr/share/quickshell'; then
 
-              echo "ERROR: /usr/share/quickshell payload found!"
-              exit 1
+            echo "ERROR: /usr/share/quickshell payload found!"
+
+            bsdtar -tf "$PKG_PATH" |
+              grep '^usr/share/quickshell'
+
+            exit 1
           fi
 
-          echo "OK: Quickshell is embedded in dms."
+          echo "OK: Quickshell UI is embedded."
 
-          # ========================================================
-          # Extract package
-          # ========================================================
+          # --------------------------------------------------------
+          # Extract package for binary inspection.
+          # --------------------------------------------------------
 
           VERIFY_DIR="/home/builder/package-check"
 
@@ -392,13 +397,13 @@ jobs:
           DMS="$VERIFY_DIR/usr/bin/dms"
 
           if [[ ! -f "$DMS" ]]; then
-              echo "ERROR: usr/bin/dms not found after extraction."
-              exit 1
+            echo "ERROR: extracted usr/bin/dms does not exist."
+            exit 1
           fi
 
-          # ========================================================
-          # Binary verification
-          # ========================================================
+          # --------------------------------------------------------
+          # Binary information
+          # --------------------------------------------------------
 
           echo
           echo "============================================================"
@@ -418,19 +423,28 @@ jobs:
             grep -E \
               'path|build|CGO_ENABLED|GOARCH|GOAMD64|GOOS|GOEXPERIMENT|tags|trimpath|vcs.revision'
 
+          # --------------------------------------------------------
+          # Hard GOAMD64=v3 check
+          # --------------------------------------------------------
+
           echo
           echo "============================================================"
-          echo " VERIFY GOAMD64"
+          echo " GOAMD64 CHECK"
           echo "============================================================"
 
           if ! go version -m "$DMS" |
               grep -q 'GOAMD64=v3'; then
 
-              echo "ERROR: GOAMD64=v3 not detected."
-              exit 1
+            echo "ERROR: Binary is NOT GOAMD64=v3."
+
+            exit 1
           fi
 
           echo "OK: GOAMD64=v3"
+
+          # --------------------------------------------------------
+          # ELF
+          # --------------------------------------------------------
 
           echo
           echo "============================================================"
@@ -440,6 +454,10 @@ jobs:
           readelf -h "$DMS" |
             grep -E 'Type:|Machine:|OS/ABI:'
 
+          # --------------------------------------------------------
+          # Dynamic libraries
+          # --------------------------------------------------------
+
           echo
           echo "============================================================"
           echo " DYNAMIC LIBRARIES"
@@ -448,25 +466,30 @@ jobs:
           readelf -d "$DMS" |
             grep NEEDED || true
 
-          # ========================================================
-          # SHA256
-          # ========================================================
+          # --------------------------------------------------------
+          # Hashes
+          # --------------------------------------------------------
 
           echo
           echo "============================================================"
-          echo " SHA256"
+          echo " BINARY SHA256"
           echo "============================================================"
 
           sha256sum "$DMS"
+
+          echo
+          echo "============================================================"
+          echo " PACKAGE SHA256"
+          echo "============================================================"
 
           sha256sum "$PKG_PATH" \
             > "${PKG_PATH}.sha256"
 
           cat "${PKG_PATH}.sha256"
 
-          # ========================================================
-          # Prepare release directory
-          # ========================================================
+          # --------------------------------------------------------
+          # Prepare GitHub release
+          # --------------------------------------------------------
 
           RELEASE_DIR="/home/builder/release"
 
@@ -486,9 +509,15 @@ jobs:
           )"
 
           echo
+          echo "============================================================"
+          echo " RELEASE"
+          echo "============================================================"
+
           echo "Package version: $VERSION"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          ls -lh "$RELEASE_DIR"
 
       # ============================================================
       # GitHub Release
@@ -513,8 +542,8 @@ jobs:
             - CPU tuning: `znver3`
             - CGO: enabled
             - PIE: enabled
-            - Quickshell UI: embedded into `/usr/bin/dms`
-            - Package format: Arch Linux `.pkg.tar.zst`
+            - Quickshell UI: embedded
+            - Package format: `.pkg.tar.zst`
 
             ### Installation
 
@@ -524,7 +553,8 @@ jobs:
 
             ### Compatibility
 
-            This package targets x86-64-v3 / AMD Zen 3-class CPUs.
+            This package requires an x86-64-v3 capable CPU
+            and is specifically tuned for AMD Zen 3 (`znver3`).
 
           files: |
             /home/builder/release/*.pkg.tar.zst
