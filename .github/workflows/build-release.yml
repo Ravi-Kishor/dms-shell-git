@@ -291,19 +291,42 @@ jobs:
 
           ls -lah "$BUILD_DIR"
 
-          # The package is created DIRECTLY beside PKGBUILD.
+          # ========================================================
+          # Locate the MAIN package (never the -debug- package).
+          #
+          # NOTE: exclusion pattern is 'dms-shell-git-debug-*' (anchored
+          # to the actual debug package name prefix) rather than the
+          # looser '*-debug-*', so a future version string containing
+          # the word "debug" can never cause a false exclusion.
+          # ========================================================
+
           PKG_PATH="$(
             find "$BUILD_DIR" \
               -maxdepth 1 \
               -type f \
               -name 'dms-shell-git-*.pkg.tar.zst' \
-              ! -name '*-debug-*' \
+              ! -name 'dms-shell-git-debug-*' \
               -print -quit
           )"
 
           if [[ -z "$PKG_PATH" ]]; then
             echo
             echo "ERROR: No package found."
+            exit 1
+          fi
+
+          echo
+          echo "============================================================"
+          echo " PACKAGE PATH RESOLVED"
+          echo "============================================================"
+
+          echo "PKG_PATH = $PKG_PATH"
+          echo "basename = $(basename "$PKG_PATH")"
+
+          # Hard safety net: refuse to continue if we somehow picked
+          # the debug package anyway.
+          if [[ "$(basename "$PKG_PATH")" == dms-shell-git-debug-* ]]; then
+            echo "ERROR: Picked the debug package by mistake!"
             exit 1
           fi
 
