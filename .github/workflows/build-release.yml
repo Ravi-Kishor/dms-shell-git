@@ -1,4 +1,4 @@
-name: Build dms-shell-git (x86-64-v3)
+name: Build dms-shell-git (Zen 3 / x86-64-v3)
 
 permissions:
   contents: write
@@ -10,63 +10,72 @@ on:
 
 jobs:
   build:
-    name: Build DMS x86-64-v3 / Zen 3
     runs-on: ubuntu-latest
 
     container:
       image: archlinux:latest
 
     steps:
-      # -------------------------
+
+      # ======================================================
       # Update system
-      # -------------------------
+      # ======================================================
+
       - name: Update base system
         run: |
           pacman -Syu --noconfirm
+
           pacman -S --needed --noconfirm \
             base-devel \
             git \
-            sudo \
-            curl \
             go \
             make \
+            curl \
+            binutils \
+            libarchive \
+            sudo \
             quickshell \
-            binutils
+            dgop \
+            accountsservice
 
-      # -------------------------
+      # ======================================================
       # Create builder user
-      # -------------------------
+      # ======================================================
+
       - name: Create builder user
         run: |
           useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-      # -------------------------
-      # Create PKGBUILD
-      # -------------------------
+          echo "builder ALL=(ALL) NOPASSWD: ALL" \
+            >> /etc/sudoers
+
+      # ======================================================
+      # Generate PKGBUILD
+      # ======================================================
+
       - name: Create PKGBUILD
         run: |
-          cat > /home/builder/PKGBUILD <<'EOF'
+          mkdir -p /home/builder/build
+          chown -R builder:builder /home/builder
+
+          cat > /home/builder/build/PKGBUILD <<'EOF'
           pkgname=dms-shell-git
+
           pkgver=0
           pkgrel=1
 
-          pkgdesc="Dank Material Shell (Git, x86-64-v3, Zen 3)"
-          arch=('x86_64')
+          pkgdesc='Desktop shell for wayland compositors built with Quickshell & GO'
 
-          url="https://github.com/AvengeMedia/DankMaterialShell"
-          license=('MIT')
+          arch=(x86_64)
+
+          url='https://github.com/AvengeMedia/DankMaterialShell'
+
+          license=(MIT)
 
           depends=(
             dgop
             quickshell
             accountsservice
-          )
-
-          makedepends=(
-            git
-            go
-            make
           )
 
           optdepends=(
@@ -80,8 +89,14 @@ jobs:
             'greetd-dms-greeter: DMS Greeter'
           )
 
+          makedepends=(
+            git
+            go
+            make
+          )
+
           provides=(
-            dms-shell
+            dms-shell=$pkgver
             dms-git
           )
 
@@ -90,26 +105,37 @@ jobs:
             dms-git
           )
 
-          source=("git+$url.git")
-          sha256sums=('SKIP')
+          source=(
+            "git+https://github.com/AvengeMedia/DankMaterialShell.git"
+            "https://github.com/AvengeMedia/DankMaterialShell/releases/download/v1.5.0/completion.bash"
+            "https://github.com/AvengeMedia/DankMaterialShell/releases/download/v1.5.0/completion.fish"
+            "https://github.com/AvengeMedia/DankMaterialShell/releases/download/v1.5.0/completion.zsh"
+          )
+
+          sha256sums=(
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+          )
 
           pkgver() {
               cd DankMaterialShell
 
               git describe \
-                --long \
-                --tags \
-                --abbrev=7 \
-                --match="v*" \
-                HEAD 2>/dev/null \
-                | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
-                || echo "0.0.0.r0.$(git rev-parse --short=7 HEAD)"
+                  --long \
+                  --tags \
+                  --abbrev=7 \
+                  --match='v*' \
+                  HEAD 2>/dev/null |
+                  sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' ||
+                  echo "0.0.0.r0.$(git rev-parse --short=7 HEAD)"
           }
 
           prepare() {
               cd DankMaterialShell
 
-              if [ -f .gitmodules ]; then
+              if [[ -f .gitmodules ]]; then
                   git submodule sync
                   git submodule update --init --recursive
               fi
@@ -118,27 +144,12 @@ jobs:
           build() {
               cd DankMaterialShell/core
 
-              # =================================
-              # CPU / Go target
-              # =================================
+              # ==================================================
+              # AMD Zen 3 / x86-64-v3
+              # ==================================================
 
-              # x86-64-v3 baseline for Go.
               export GOAMD64=v3
-
-              # =================================
-              # CGO
-              # =================================
-
-              # Upstream Makefile forces CGO_ENABLED=0
-              # for its normal "make" target.
-              #
-              # We intentionally bypass that target and
-              # invoke go build directly, like Chaotic AUR.
               export CGO_ENABLED=1
-
-              # =================================
-              # Zen 3 C/C++ optimization
-              # =================================
 
               export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt"
               export CXXFLAGS="$CFLAGS"
@@ -151,209 +162,301 @@ jobs:
               export CGO_CXXFLAGS="$CXXFLAGS"
               export CGO_LDFLAGS="$LDFLAGS"
 
-              # =================================
-              # Build metadata
-              # =================================
+              local VERSION BUILD_TIME COMMIT LDFLAGS_GO
 
               VERSION="$(git describe --tags --always 2>/dev/null || echo dev)"
               BUILD_TIME="$(date -u '+%Y-%m-%d_%H:%M:%S')"
               COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-              # =================================
-              # Go linker flags
-              # =================================
-
               LDFLAGS_GO="-s -w \
-                -X main.Version=${VERSION} \
-                -X main.buildTime=${BUILD_TIME} \
-                -X main.commit=${COMMIT} \
-                -linkmode=external"
+          -X main.Version=${VERSION} \
+          -X main.buildTime=${BUILD_TIME} \
+          -X main.commit=${COMMIT} \
+          -linkmode=external"
 
-              # =================================
-              # Embed Quickshell UI
-              # =================================
-
+              # Embed Quickshell UI into the Go binary.
               make sync-shell
-
-              # =================================
-              # Go build
-              # =================================
 
               GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
 
               go build \
-                -tags 'distro_binary withshell' \
-                -ldflags "$LDFLAGS_GO" \
-                $GOFLAGS \
-                -o dms \
-                ./cmd/dms
+                  -tags 'distro_binary withshell' \
+                  -ldflags "$LDFLAGS_GO" \
+                  $GOFLAGS \
+                  -o dms \
+                  ./cmd/dms
           }
 
           package() {
-              cd DankMaterialShell
+
+              # ==================================================
+              # Main binary
+              # ==================================================
 
               install -Dm0755 \
-                core/dms \
-                "$pkgdir/usr/bin/dms"
+                  DankMaterialShell/core/dms \
+                  "$pkgdir/usr/bin/dms"
 
-              install -dm0755 \
-                "$pkgdir/usr/share/quickshell/dms"
+              # ==================================================
+              # Systemd service
+              # ==================================================
 
-              cp -a quickshell/. \
-                "$pkgdir/usr/share/quickshell/dms/"
+              install -Dm0644 \
+                  "$srcdir/DankMaterialShell/assets/systemd/dms.service" \
+                  "$pkgdir/usr/lib/systemd/user/dms.service"
+
+              # ==================================================
+              # Shell completions
+              # ==================================================
+
+              install -Dm0644 \
+                  "$srcdir/completion.bash" \
+                  "$pkgdir/usr/share/bash-completion/completions/dms"
+
+              install -Dm0644 \
+                  "$srcdir/completion.zsh" \
+                  "$pkgdir/usr/share/zsh/site-functions/_dms"
+
+              install -Dm0644 \
+                  "$srcdir/completion.fish" \
+                  "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish"
+
+              # ==================================================
+              # Desktop files
+              # ==================================================
+
+              install -Dm0644 \
+                  "$srcdir/DankMaterialShell/assets/dms-open.desktop" \
+                  "$pkgdir/usr/share/applications/dms-open.desktop"
+
+              install -Dm0644 \
+                  "$srcdir/DankMaterialShell/assets/com.danklinux.dms.desktop" \
+                  "$pkgdir/usr/share/applications/com.danklinux.dms.desktop"
+
+              install -Dm0644 \
+                  "$srcdir/DankMaterialShell/assets/com.danklinux.dms.notepad.desktop" \
+                  "$pkgdir/usr/share/applications/com.danklinux.dms.notepad.desktop"
+
+              # ==================================================
+              # Icon
+              # ==================================================
+
+              install -Dm0644 \
+                  "$srcdir/DankMaterialShell/core/assets/danklogo.svg" \
+                  "$pkgdir/usr/share/icons/hicolor/scalable/apps/danklogo.svg"
+
+              # ==================================================
+              # Documentation
+              # ==================================================
+
+              install -Dm0644 \
+                  "$srcdir/DankMaterialShell/README.md" \
+                  "$pkgdir/usr/share/doc/$pkgname/README.md"
+
+              if [[ -d "$srcdir/DankMaterialShell/docs" ]]; then
+                  cp -r \
+                      "$srcdir/DankMaterialShell/docs/"* \
+                      "$pkgdir/usr/share/doc/$pkgname/"
+              fi
+
+              # ==================================================
+              # IMPORTANT:
+              #
+              # Do NOT install:
+              #
+              # /usr/share/quickshell/dms
+              #
+              # make sync-shell embeds the UI into dms.
+              # ==================================================
           }
           EOF
 
-          chown -R builder:builder /home/builder
+          chown builder:builder /home/builder/build/PKGBUILD
 
-      # -------------------------
+      # ======================================================
       # Build package
-      # -------------------------
-      - name: Build package
+      # ======================================================
+
+      - name: Build Arch package
         run: |
           su builder -c '
+            cd /home/builder/build
+
             export MAKEFLAGS="-j$(nproc)"
-            cd /home/builder
-            makepkg -s --cleanbuild --noconfirm
+
+            makepkg \
+              --syncdeps \
+              --cleanbuild \
+              --clean \
+              --noconfirm
           '
 
-      # -------------------------
-      # Verify the actual pkgdir
-      # -------------------------
-      #
-      # IMPORTANT:
-      # We intentionally verify:
-      #
-      #   /home/builder/pkg/dms-shell-git/usr/bin/dms
-      #
-      # directly.
-      #
-      # There is NO tar extraction here.
-      # -------------------------
-      - name: VERIFY DMS x86-64-v3 PIE
+      # ======================================================
+      # Verify package
+      # ======================================================
+
+      - name: Verify package
+        id: verify
         run: |
           set -e
 
-          DMS="/home/builder/pkg/dms-shell-git/usr/bin/dms"
-
-          echo "=========================================="
-          echo "DMS BUILD VERIFICATION"
-          echo "=========================================="
-          echo
-
-          if [ ! -f "$DMS" ]; then
-            echo "ERROR: DMS binary not found:"
-            echo "$DMS"
-            echo
-            echo "Available files:"
-            find /home/builder/pkg -maxdepth 5 -type f -print || true
-            exit 1
-          fi
-
-          echo "Binary:"
-          echo "$DMS"
-          echo
-
-          echo "===== FILE ====="
-          file "$DMS"
-          echo
-
-          echo "===== ELF HEADER ====="
-          readelf -h "$DMS" | \
-            grep -E 'Class:|Machine:|Type:'
-          echo
-
-          echo "===== DYNAMIC DEPENDENCIES ====="
-          readelf -d "$DMS" | \
-            grep NEEDED || true
-          echo
-
-          echo "===== GO BUILD INFO ====="
-          go version -m "$DMS" || true
-          echo
-
-          echo "===== SHA256 ====="
-          sha256sum "$DMS"
-          echo
-
-          echo "===== SIZE ====="
-          ls -lh "$DMS"
-          echo
-
-          echo "=========================================="
-          echo "VERIFICATION PASSED"
-          echo "=========================================="
-
-      # -------------------------
-      # Locate finished package
-      # -------------------------
-      - name: Locate package
-        id: pkg
-        run: |
-          set -e
-
-          PKG_PATH=""
-
-          for f in /home/builder/*.pkg.tar.zst; do
-            [ -f "$f" ] || continue
-
-            case "$(basename "$f")" in
-              *-debug-*.pkg.tar.zst)
-                continue
-                ;;
-              dms-shell-git-*.pkg.tar.zst)
-                PKG_PATH="$f"
-                break
-                ;;
-            esac
-          done
-
-          if [ -z "$PKG_PATH" ]; then
-            echo "ERROR: Main package not found."
-
-            echo
-            echo "Files in /home/builder:"
-            find /home/builder -maxdepth 1 -type f -print
-
-            exit 1
-          fi
-
-          PKG_FILE="$(basename "$PKG_PATH")"
-
-          VERSION="$(
-            echo "$PKG_FILE" |
-              sed -E \
-                's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst/\1/'
+          PKG_PATH="$(
+            find /home/builder/build \
+              -maxdepth 1 \
+              -type f \
+              -name "dms-shell-git-*.pkg.tar.zst" \
+              ! -name "*-debug-*" |
+              head -n1
           )"
 
-          NEW_NAME="dms-shell-git-${VERSION}-x86_64_v3.pkg.tar.zst"
+          if [[ -z "$PKG_PATH" ]]; then
+            echo "ERROR: package not found"
+            exit 1
+          fi
+
+          echo "Package:"
+          ls -lh "$PKG_PATH"
+
+          echo
+          echo "===== PACKAGE INFO ====="
+
+          pacman -Qip "$PKG_PATH" |
+            grep -E \
+              "Name|Version|Installed Size|Architecture"
+
+          echo
+          echo "===== PACKAGE TYPE ====="
+
+          file "$PKG_PATH"
+
+          echo
+          echo "===== QUICKSHELL PAYLOAD CHECK ====="
+
+          if bsdtar -tf "$PKG_PATH" |
+              grep -q "^usr/share/quickshell"; then
+
+            echo "ERROR: package contains external Quickshell payload"
+            bsdtar -tf "$PKG_PATH" |
+              grep "^usr/share/quickshell"
+
+            exit 1
+          fi
+
+          echo "OK: no /usr/share/quickshell payload"
+
+          echo
+          echo "===== EXTRACTING PACKAGE ====="
+
+          rm -rf /home/builder/package-check
+          mkdir -p /home/builder/package-check
+
+          bsdtar \
+            -xf "$PKG_PATH" \
+            -C /home/builder/package-check
+
+          DMS="/home/builder/package-check/usr/bin/dms"
+
+          test -f "$DMS"
+
+          echo
+          echo "===== DMS BINARY ====="
+
+          ls -lh "$DMS"
+          file "$DMS"
+
+          echo
+          echo "===== GO BUILD INFO ====="
+
+          go version -m "$DMS" |
+            grep -E \
+              "path|build|CGO_ENABLED|GOARCH|GOAMD64|GOOS|GOEXPERIMENT|tags|trimpath|vcs.revision"
+
+          echo
+          echo "===== VERIFY GOAMD64 ====="
+
+          go version -m "$DMS" |
+            grep -q "GOAMD64=v3"
+
+          echo "OK: GOAMD64=v3"
+
+          echo
+          echo "===== ELF ====="
+
+          readelf -h "$DMS" |
+            grep -E \
+              "Type:|Machine:|OS/ABI:"
+
+          echo
+          echo "===== DYNAMIC LIBRARIES ====="
+
+          readelf -d "$DMS" |
+            grep NEEDED
+
+          echo
+          echo "===== SHA256 ====="
+
+          sha256sum "$PKG_PATH" \
+            > "${PKG_PATH}.sha256"
+
+          cat "${PKG_PATH}.sha256"
+
+          echo
+          echo "===== BUILD ID ====="
+
+          readelf -n "$DMS" |
+            grep -A1 "Build ID" || true
+
+          VERSION="$(
+            pacman -Qp "$PKG_PATH" |
+            sed 's/^dms-shell-git-//' |
+            sed 's/-x86_64\.pkg\.tar\.zst$//'
+          )"
+
+          echo "Package version: $VERSION"
 
           mkdir -p /home/builder/release
 
           cp "$PKG_PATH" \
-            "/home/builder/release/$NEW_NAME"
+            /home/builder/release/
 
-          echo "Main package:"
-          echo "$PKG_PATH"
-
-          echo
-          echo "Release package:"
-          echo "/home/builder/release/$NEW_NAME"
-
-          echo
-          echo "Version:"
-          echo "$VERSION"
+          cp "${PKG_PATH}.sha256" \
+            /home/builder/release/
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # -------------------------
-      # Create GitHub Release
-      # -------------------------
+      # ======================================================
+      # Release
+      # ======================================================
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.pkg.outputs.version }}-v3
-          name: dms-shell-git ${{ steps.pkg.outputs.version }} (x86-64-v3 / Zen 3)
-          files: /home/builder/release/*.pkg.tar.zst
+          tag_name: ${{ steps.verify.outputs.version }}-v3
+          name: dms-shell-git ${{ steps.verify.outputs.version }} (x86-64-v3 / Zen 3)
+          body: |
+            ## dms-shell-git
+
+            Built automatically from the latest DankMaterialShell `master`.
+
+            ### Build target
+
+            - Architecture: x86_64
+            - GOAMD64: v3
+            - CPU tuning: AMD Zen 3 (`znver3`)
+            - CGO: enabled
+            - Go build mode: PIE
+            - Quickshell UI: embedded in `/usr/bin/dms`
+
+            ### Install
+
+            ```bash
+            sudo pacman -U dms-shell-git-*.pkg.tar.zst
+            ```
+
+            **Requires an x86-64-v3 capable CPU.**
+
+          files: |
+            /home/builder/release/*.pkg.tar.zst
+            /home/builder/release/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
