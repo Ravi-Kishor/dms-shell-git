@@ -157,11 +157,11 @@ jobs:
               export GOAMD64=v3
               export CGO_ENABLED=1
 
-              export CFLAGS="-march=znver3 -O3 -pipe -fno-plt"
+              export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt -fomit-frame-pointer -flto=auto"
               export CXXFLAGS="$CFLAGS"
               export CPPFLAGS="$CFLAGS"
 
-              export LDFLAGS="-Wl,-O2,--as-needed"
+              export LDFLAGS="-Wl,-O3,--as-needed"
 
               export CGO_CPPFLAGS="$CPPFLAGS"
               export CGO_CFLAGS="$CFLAGS"
@@ -195,7 +195,8 @@ jobs:
               -X main.Version=${VERSION} \
               -X main.buildTime=${BUILD_TIME} \
               -X main.commit=${COMMIT} \
-              -linkmode=external"
+              -linkmode=external \
+              -extldflags=-Wl,-O3,--as-needed"
 
               # ======================================================
               # Embed DMS Quickshell UI
@@ -215,6 +216,9 @@ jobs:
               if [[ -f default.pgo ]]; then
                   echo "==> PGO profile found"
                   PGO_FLAG="-pgo=default.pgo"
+              else
+                  echo "==> No PGO profile found"
+                  echo "==> PGO: disabled"
               fi
 
               echo
@@ -487,6 +491,7 @@ jobs:
           echo "============================================================"
 
           ls -lh "$DMS"
+          stat -c '%n: %s bytes' "$DMS"
           file "$DMS"
 
           # ----------------------------------------------------------
@@ -540,7 +545,7 @@ jobs:
             grep NEEDED || true
 
           # ----------------------------------------------------------
-          # Ensure libc is present for the intended CGO build
+          # Ensure libc is present for intended CGO build
           # ----------------------------------------------------------
 
           if ! readelf -d "$DMS" |
@@ -624,6 +629,11 @@ jobs:
             - Go target: `GOAMD64=v3`
             - CGO: enabled
             - PIE: enabled
+            - Optimization: `-O3`
+            - CPU tuning: `-march=znver3 -mtune=znver3`
+            - Frame pointers: omitted
+            - LTO: enabled via `-flto=auto`
+            - Linker optimization: `-Wl,-O3,--as-needed`
             - Quickshell: runtime dependency
             - DMS UI: embedded into `/usr/bin/dms`
             - Separate `/usr/share/quickshell/dms`: not packaged
