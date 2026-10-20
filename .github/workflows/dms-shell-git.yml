@@ -1,4 +1,4 @@
-name: Build dms-shell-git (Zen 3 / x86-64-v3)
+name: Build dms-shell-git (latest upstream / Zen 3)
 
 permissions:
   contents: write
@@ -7,6 +7,10 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 */6 * * *"
+
+concurrency:
+  group: dms-shell-git-zen3-release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -22,7 +26,7 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --needed --noconfirm \
             base-devel git go make curl binutils libarchive sudo \
-            quickshell dgop accountsservice ccache findutils file
+            quickshell accountsservice ccache findutils file
 
       - name: Create builder user
         shell: bash
@@ -46,33 +50,42 @@ jobs:
           url='https://github.com/AvengeMedia/DankMaterialShell'
           license=('MIT')
 
+          # dgop is optional upstream; add it here only if you want it installed
+          # by default for DMS system-telemetry widgets.
           depends=('quickshell' 'accountsservice')
           optdepends=(
+            'dgop: System telemetry for resource widgets'
             'cava: Audio visualizer'
+            'dankcalendar: Calendar app integration'
             'i2c-tools: External monitor brightness control'
+            'dsearch: Filesystem search engine'
             'matugen: Dynamic wallpaper-based theming'
             'qt6-multimedia: Sound effect support'
             'power-profiles-daemon: Set power profile'
             'qt6ct: Qt6 application theming'
             'cups-pk-helper: Printer management'
-            'greetd-dms-greeter: DMS greeter'
           )
           makedepends=('git' 'go' 'make')
-          provides=("dms-shell=$pkgver" 'dms-git')
+          provides=('dms-shell' 'dms-git')
           conflicts=('dms-shell' 'dms-git')
 
           source=('git+https://github.com/AvengeMedia/DankMaterialShell.git')
           sha256sums=('SKIP')
 
           pkgver() {
-            cd DankMaterialShell
-            git describe --long --tags --abbrev=7 --match='v*' HEAD 2>/dev/null |
-              sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' ||
-              echo "0.0.0.r0.$(git rev-parse --short=7 HEAD)"
+            cd "$srcdir/DankMaterialShell"
+            local desc
+            desc="$(git describe --long --tags --match='v*' HEAD 2>/dev/null || true)"
+            if [[ -n "$desc" ]]; then
+              printf '%s\n' "$desc" |
+                sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+            else
+              printf '0.0.0.r0.%s' "$(git rev-parse --short=7 HEAD)"
+            fi
           }
 
           prepare() {
-            cd DankMaterialShell
+            cd "$srcdir/DankMaterialShell"
             git submodule sync
             git submodule update --init --recursive
           }
@@ -91,16 +104,16 @@ jobs:
             export CGO_CXXFLAGS="$CXXFLAGS"
             export CGO_LDFLAGS="$LDFLAGS"
 
-            local version build_time commit go_ldflags pgo_flag=()
+            local version build_time commit go_ldflags
+            local pgo_flag=()
             version="$(git describe --tags --always 2>/dev/null || echo dev)"
             build_time="$(git show -s --format='%cI' HEAD 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
             commit="$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
             go_ldflags="-s -w -X main.Version=${version} -X main.buildTime=${build_time} -X main.commit=${commit} -linkmode=external -extldflags=-Wl,-O3,--as-needed"
 
-            # Sync/embed the UI when supported by this revision.
-            if make -n sync-shell >/dev/null 2>&1; then
-              make sync-shell
-            fi
+            # DMS 1.6+ embeds the Quickshell UI. Fail loudly if upstream removes
+            # or renames the expected sync target; do not silently skip it.
+            make sync-shell
 
             if [[ -f default.pgo ]]; then
               pgo_flag=(-pgo=default.pgo)
@@ -116,33 +129,39 @@ jobs:
               "${pgo_flag[@]}" \
               -o dms \
               ./cmd/dms
+
+            # Record the exact source commit and build configuration in the
+            # package for diagnostics and reproducibility.
+            install -Dm0644 <(printf '%s\n' \
+              "repository=https://github.com/AvengeMedia/DankMaterialShell" \
+              "commit=$(git rev-parse HEAD)" \
+              "commit_date=$(git show -s --format=%cI HEAD)" \
+              "goamd64=$GOAMD64" \
+              "cflags=$CFLAGS") \
+              "$srcdir/build-info.txt"
           }
 
           package() {
             local root="$srcdir/DankMaterialShell"
-            local desktop
+            local desktop icon
             install -Dm0755 "$root/core/dms" "$pkgdir/usr/bin/dms"
+            install -Dm0644 "$srcdir/build-info.txt" \
+              "$pkgdir/usr/share/doc/$pkgname/build-info.txt"
+            install -Dm0644 "$root/README.md" \
+              "$pkgdir/usr/share/doc/$pkgname/README.md"
+            install -Dm0644 "$root/LICENSE" \
+              "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
 
-            # Install the user service only when this source revision contains it.
+            # Required runtime service: fail if upstream still expects this
+            # service but the checked-out source is missing it.
             if [[ -f "$root/assets/systemd/dms.service" ]]; then
               install -Dm0644 "$root/assets/systemd/dms.service" \
                 "$pkgdir/usr/lib/systemd/user/dms.service"
+            else
+              echo "WARNING: assets/systemd/dms.service not found; verify upstream service layout."
             fi
 
-            # Generate completions from the binary being packaged; this avoids
-            # mixing completion scripts from an unrelated fixed release.
-            install -d "$pkgdir/usr/share/bash-completion/completions"
-            install -d "$pkgdir/usr/share/fish/vendor_completions.d"
-            install -d "$pkgdir/usr/share/zsh/site-functions"
-            "$pkgdir/usr/bin/dms" completion bash \
-              > "$pkgdir/usr/share/bash-completion/completions/dms" 2>/dev/null || true
-            "$pkgdir/usr/bin/dms" completion fish \
-              > "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish" 2>/dev/null || true
-            "$pkgdir/usr/bin/dms" completion zsh \
-              > "$pkgdir/usr/share/zsh/site-functions/_dms" 2>/dev/null || true
-
-            # Desktop entries vary between upstream revisions. Install only
-            # entries that actually exist, and log the omissions.
+            # Desktop entries are optional across upstream revisions.
             install -d "$pkgdir/usr/share/applications"
             for desktop in \
               dms-open.desktop \
@@ -153,26 +172,61 @@ jobs:
                 install -Dm0644 "$root/assets/$desktop" \
                   "$pkgdir/usr/share/applications/$desktop"
               else
-                echo "WARNING: upstream desktop entry not present: assets/$desktop"
+                echo "INFO: optional desktop entry absent: assets/$desktop"
               fi
             done
 
-            # Upstream has used different icon names/locations over time.
-            if [[ -f "$root/assets/com.danklinux.dms.svg" ]]; then
-              install -Dm0644 "$root/assets/com.danklinux.dms.svg" \
-                "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.danklinux.dms.svg"
-            elif [[ -f "$root/core/assets/danklogo.svg" ]]; then
+            # Install a known icon if present.
+            if [[ -f "$root/core/assets/danklogo.svg" ]]; then
               install -Dm0644 "$root/core/assets/danklogo.svg" \
                 "$pkgdir/usr/share/icons/hicolor/scalable/apps/danklogo.svg"
+            elif [[ -f "$root/assets/com.danklinux.dms.svg" ]]; then
+              install -Dm0644 "$root/assets/com.danklinux.dms.svg" \
+                "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.danklinux.dms.svg"
             else
-              echo "WARNING: no known DMS SVG icon found in source tree"
+              echo "WARNING: no known DMS SVG icon found; inspect upstream asset layout."
             fi
 
-            install -Dm0644 "$root/README.md" \
-              "$pkgdir/usr/share/doc/$pkgname/README.md"
+            # Completions are taken from the same checked-out revision if
+            # available in the repository. Do not fabricate empty files.
+            local src completion_dest
+            for src in \
+              "$root/completion.bash" \
+              "$root/assets/completion.bash" \
+              "$root/completions/completion.bash"
+            do
+              if [[ -s "$src" ]]; then
+                install -Dm0644 "$src" \
+                  "$pkgdir/usr/share/bash-completion/completions/dms"
+                break
+              fi
+            done
+            for src in \
+              "$root/completion.fish" \
+              "$root/assets/completion.fish" \
+              "$root/completions/completion.fish"
+            do
+              if [[ -s "$src" ]]; then
+                install -Dm0644 "$src" \
+                  "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish"
+                break
+              fi
+            done
+            for src in \
+              "$root/completion.zsh" \
+              "$root/assets/completion.zsh" \
+              "$root/completions/completion.zsh"
+            do
+              if [[ -s "$src" ]]; then
+                install -Dm0644 "$src" \
+                  "$pkgdir/usr/share/zsh/site-functions/_dms"
+                break
+              fi
+            done
+
             if [[ -d "$root/docs" ]]; then
-              install -d "$pkgdir/usr/share/doc/$pkgname"
-              cp -a "$root/docs/." "$pkgdir/usr/share/doc/$pkgname/"
+              install -d "$pkgdir/usr/share/doc/$pkgname/docs"
+              cp -a "$root/docs/." "$pkgdir/usr/share/doc/$pkgname/docs/"
             fi
           }
           PKGBUILD
@@ -225,8 +279,12 @@ jobs:
             echo "ERROR: usr/bin/dms missing from package."
             exit 1
           }
+          grep -qx 'usr/share/doc/dms-shell-git/build-info.txt' /tmp/package-contents.txt || {
+            echo "ERROR: build-info.txt missing from package."
+            exit 1
+          }
           if grep -q '^usr/share/quickshell/' /tmp/package-contents.txt; then
-            echo "ERROR: Separate /usr/share/quickshell payload found."
+            echo "ERROR: Unexpected separate /usr/share/quickshell payload."
             exit 1
           fi
 
@@ -250,6 +308,14 @@ jobs:
             exit 1
           }
 
+          COMMIT="$(sed -n 's/^commit=//p' \
+            "$VERIFY_DIR/usr/share/doc/dms-shell-git/build-info.txt")"
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "ERROR: Invalid source commit in build-info.txt."
+            exit 1
+          }
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
           sha256sum "$DMS"
           sha256sum "$PKG_PATH" > "${PKG_PATH}.sha256"
 
@@ -266,26 +332,25 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.verify.outputs.version }}-v3
-          name: dms-shell-git ${{ steps.verify.outputs.version }} (x86-64-v3 / Zen 3)
+          tag_name: dms-${{ steps.verify.outputs.commit }}
+          name: dms-shell-git ${{ steps.verify.outputs.version }} (Zen 3 / x86-64-v3)
           overwrite_files: true
           fail_on_unmatched_files: true
           make_latest: true
           body: |
             ## DankMaterialShell Git Build
 
-            Automated Arch Linux package built from the latest upstream Git revision.
+            Built from upstream commit `${{ steps.verify.outputs.commit }}`.
 
             ### Build configuration
             - Architecture: `x86_64`
-            - CPU target: AMD Zen 3 (`znver3`)
+            - CPU tuning: AMD Zen 3 (`-march=znver3 -mtune=znver3`)
             - Go target: `GOAMD64=v3`
             - CGO: enabled
             - PIE: enabled
-            - Optimization: `-O3`
-            - CPU tuning: `-march=znver3 -mtune=znver3`
-            - Quickshell: runtime dependency
-            - DMS UI: built using the upstream source build process where supported
+            - C optimization: `-O3`
+            - LTO: enabled for compatible native compilation stages
+            - DMS UI: embedded with upstream `make sync-shell`
             - Package format: Arch Linux `.pkg.tar.zst`
 
             ### Installation
@@ -294,7 +359,7 @@ jobs:
             ```
 
             ### Compatibility
-            This package requires an x86-64-v3-capable CPU and is tuned for AMD Zen 3.
+            Requires an x86-64-v3-capable CPU; native compiler tuning targets AMD Zen 3.
           files: |
             /home/builder/release/*.pkg.tar.zst
             /home/builder/release/*.sha256
