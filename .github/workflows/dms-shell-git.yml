@@ -1,12 +1,12 @@
-name: Build dms-shell-git (latest upstream / Zen 3)
-
-permissions:
-  contents: write
+name: Build Dux Shell (DMS 2.x latest upstream / Zen 3)
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 */6 * * *"
+
+permissions:
+  contents: write
 
 concurrency:
   group: dms-shell-git-zen3-release
@@ -19,25 +19,38 @@ jobs:
       image: archlinux:latest
 
     steps:
-      - name: Update base system
+      - name: Update base system and install build tools
         shell: bash
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm
           pacman -S --needed --noconfirm \
             base-devel git go make curl binutils libarchive sudo \
-            quickshell accountsservice ccache findutils file
+            quickshell
 
-      - name: Create builder user
+          echo "Installed toolchain:"
+          go version
+          git --version
+          make --version | head -n 1
+
+          GO_VERSION="$(go version | awk '{print $3}' | sed 's/^go//')"
+          if [[ "$(printf '%s\n' '1.27.1' "$GO_VERSION" | sort -V | head -n 1)" != "1.27.1" ]]; then
+            echo "ERROR: Dux Shell 2.x requires Go 1.27.1 or newer; found ${GO_VERSION}."
+            exit 1
+          fi
+
+      - name: Create unprivileged package builder
         shell: bash
         run: |
           set -euo pipefail
           useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          printf 'builder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
           install -d -o builder -g builder /home/builder/dms-build
-          install -d -o builder -g builder /home/builder/.ccache
+          install -d -o builder -g builder /home/builder/go/pkg/mod
+          install -d -o builder -g builder /home/builder/.cache/go-build
 
-      - name: Generate PKGBUILD
+      - name: Generate PKGBUILD for Dux Shell 2.x
         shell: bash
         run: |
           set -euo pipefail
@@ -47,33 +60,34 @@ jobs:
           pkgrel=1
           pkgdesc='Desktop shell for Wayland compositors built with Quickshell and Go'
           arch=('x86_64')
-          url='https://github.com/AvengeMedia/DankMaterialShell'
+          url='https://github.com/duxlabs-dev/dux-shell'
           license=('MIT')
 
-          # dgop is optional upstream; add it here only if you want it installed
-          # by default for DMS system-telemetry widgets.
-          depends=('quickshell' 'accountsservice')
+          depends=('quickshell')
           optdepends=(
-            'dgop: System telemetry for resource widgets'
-            'cava: Audio visualizer'
-            'dankcalendar: Calendar app integration'
-            'i2c-tools: External monitor brightness control'
-            'dsearch: Filesystem search engine'
-            'matugen: Dynamic wallpaper-based theming'
-            'qt6-multimedia: Sound effect support'
-            'power-profiles-daemon: Set power profile'
+            'dux-gop: system telemetry for resource widgets'
+            'dux-calendar: calendar integration'
+            'dux-search: filesystem search integration'
+            'cava: audio visualizer'
+            'i2c-tools: external monitor brightness control'
+            'matugen: dynamic wallpaper-based theming'
+            'qt6-multimedia: sound effects'
+            'power-profiles-daemon: power profile control'
             'qt6ct: Qt6 application theming'
-            'cups-pk-helper: Printer management'
+            'accountsservice: user account details'
+            'cups-pk-helper: printer management'
           )
           makedepends=('git' 'go' 'make')
           provides=('dms-shell' 'dms-git')
           conflicts=('dms-shell' 'dms-git')
 
-          source=('git+https://github.com/AvengeMedia/DankMaterialShell.git')
+          source=('git+https://github.com/duxlabs-dev/dux-shell.git')
           sha256sums=('SKIP')
 
+          _repo="$srcdir/dux-shell"
+
           pkgver() {
-            cd "$srcdir/DankMaterialShell"
+            cd "$_repo"
             local desc
             desc="$(git describe --long --tags --match='v*' HEAD 2>/dev/null || true)"
             if [[ -n "$desc" ]]; then
@@ -85,144 +99,121 @@ jobs:
           }
 
           prepare() {
-            cd "$srcdir/DankMaterialShell"
-            git submodule sync
+            cd "$_repo"
+            git submodule sync --recursive
             git submodule update --init --recursive
           }
 
           build() {
-            cd "$srcdir/DankMaterialShell/core"
+            cd "$_repo/core"
 
-            export GOAMD64=v3
-            export CGO_ENABLED=1
-            export CFLAGS="-march=znver3 -mtune=znver3 -O3 -pipe -fno-plt -fomit-frame-pointer -flto=auto"
-            export CXXFLAGS="$CFLAGS"
-            export CPPFLAGS="$CFLAGS"
-            export LDFLAGS="-Wl,-O3,--as-needed"
-            export CGO_CPPFLAGS="$CPPFLAGS"
-            export CGO_CFLAGS="$CFLAGS"
-            export CGO_CXXFLAGS="$CXXFLAGS"
-            export CGO_LDFLAGS="$LDFLAGS"
-
-            local version build_time commit go_ldflags
-            local pgo_flag=()
-            version="$(git describe --tags --always 2>/dev/null || echo dev)"
-            build_time="$(git show -s --format='%cI' HEAD 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
-            commit="$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
-            go_ldflags="-s -w -X main.Version=${version} -X main.buildTime=${build_time} -X main.commit=${commit} -linkmode=external -extldflags=-Wl,-O3,--as-needed"
-
-            # DMS 1.6+ embeds the Quickshell UI. Fail loudly if upstream removes
-            # or renames the expected sync target; do not silently skip it.
-            make sync-shell
-
-            if [[ -f default.pgo ]]; then
-              pgo_flag=(-pgo=default.pgo)
+            local go_version
+            go_version="$(go version | awk '{print $3}' | sed 's/^go//')"
+            if [[ "$(printf '%s\n' '1.27.1' "$go_version" | sort -V | head -n 1)" != "1.27.1" ]]; then
+              error "Dux Shell 2.x requires Go 1.27.1 or newer; found ${go_version}"
             fi
 
+            export GOAMD64=v3
+            export CGO_ENABLED=0
+            export GOTOOLCHAIN=local
+            export GOFLAGS='-trimpath'
+            export GOMAXPROCS="$(nproc)"
+
+            # The current upstream core Makefile embeds the QML shell using
+            # this target. Fail if the target or expected source layout changes.
+            make sync-shell
+            [[ -d internal/shellembed/dist ]] || {
+              error "Embedded shell directory missing after make sync-shell"
+            }
+
+            local version build_time commit go_ldflags
+            version="$(git -C "$_repo" describe --tags --always 2>/dev/null || echo dev)"
+            build_time="$(git -C "$_repo" show -s --format='%cI' HEAD 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            commit="$(git -C "$_repo" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+            go_ldflags="-s -w -X main.Version=${version} -X main.buildTime=${build_time} -X main.commit=${commit}"
+
+            # Match upstream's CGO-disabled build while enabling the distro
+            # feature set and embedded shell. GOAMD64=v3 targets x86-64-v3.
             go build \
               -tags 'distro_binary withshell' \
               -ldflags "$go_ldflags" \
               -buildmode=pie \
-              -trimpath \
               -mod=readonly \
               -modcacherw \
-              "${pgo_flag[@]}" \
               -o dms \
               ./cmd/dms
 
-            # Record the exact source commit and build configuration in the
-            # package for diagnostics and reproducibility.
             install -Dm0644 <(printf '%s\n' \
-              "repository=https://github.com/AvengeMedia/DankMaterialShell" \
-              "commit=$(git rev-parse HEAD)" \
-              "commit_date=$(git show -s --format=%cI HEAD)" \
+              "repository=https://github.com/duxlabs-dev/dux-shell" \
+              "commit=$(git -C "$_repo" rev-parse HEAD)" \
+              "commit_date=$(git -C "$_repo" show -s --format=%cI HEAD)" \
+              "go_version=$(go version)" \
               "goamd64=$GOAMD64" \
-              "cflags=$CFLAGS") \
+              "cgo_enabled=$CGO_ENABLED" \
+              "build_tags=distro_binary withshell") \
               "$srcdir/build-info.txt"
           }
 
           package() {
-            local root="$srcdir/DankMaterialShell"
-            local desktop icon
+            local root="$_repo"
+            local desktop
+
             install -Dm0755 "$root/core/dms" "$pkgdir/usr/bin/dms"
             install -Dm0644 "$srcdir/build-info.txt" \
               "$pkgdir/usr/share/doc/$pkgname/build-info.txt"
             install -Dm0644 "$root/README.md" \
               "$pkgdir/usr/share/doc/$pkgname/README.md"
             install -Dm0644 "$root/LICENSE" \
-              "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+              "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 
-            # Required runtime service: fail if upstream still expects this
-            # service but the checked-out source is missing it.
             if [[ -f "$root/assets/systemd/dms.service" ]]; then
               install -Dm0644 "$root/assets/systemd/dms.service" \
                 "$pkgdir/usr/lib/systemd/user/dms.service"
             else
-              echo "WARNING: assets/systemd/dms.service not found; verify upstream service layout."
+              error "Required upstream service missing: assets/systemd/dms.service"
             fi
 
-            # Desktop entries are optional across upstream revisions.
             install -d "$pkgdir/usr/share/applications"
             for desktop in \
               dms-open.desktop \
-              com.danklinux.dms.desktop \
-              com.danklinux.dms.notepad.desktop
+              dev.duxlabs.shell.desktop \
+              dev.duxlabs.shell.notepad.desktop
             do
-              if [[ -f "$root/assets/$desktop" ]]; then
+              if [[ -s "$root/assets/$desktop" ]]; then
                 install -Dm0644 "$root/assets/$desktop" \
                   "$pkgdir/usr/share/applications/$desktop"
+              elif [[ "$desktop" == "dms-open.desktop" ]]; then
+                error "Required desktop entry missing: assets/$desktop"
               else
                 echo "INFO: optional desktop entry absent: assets/$desktop"
               fi
             done
 
-            # Install a known icon if present.
-            if [[ -f "$root/core/assets/danklogo.svg" ]]; then
-              install -Dm0644 "$root/core/assets/danklogo.svg" \
-                "$pkgdir/usr/share/icons/hicolor/scalable/apps/danklogo.svg"
-            elif [[ -f "$root/assets/com.danklinux.dms.svg" ]]; then
-              install -Dm0644 "$root/assets/com.danklinux.dms.svg" \
-                "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.danklinux.dms.svg"
+            if [[ -s "$root/assets/dev.duxlabs.shell.svg" ]]; then
+              install -Dm0644 "$root/assets/dev.duxlabs.shell.svg" \
+                "$pkgdir/usr/share/icons/hicolor/scalable/apps/dev.duxlabs.shell.svg"
             else
-              echo "WARNING: no known DMS SVG icon found; inspect upstream asset layout."
+              error "Required upstream icon missing: assets/dev.duxlabs.shell.svg"
             fi
 
-            # Completions are taken from the same checked-out revision if
-            # available in the repository. Do not fabricate empty files.
-            local src completion_dest
-            for src in \
-              "$root/completion.bash" \
-              "$root/assets/completion.bash" \
-              "$root/completions/completion.bash"
-            do
-              if [[ -s "$src" ]]; then
-                install -Dm0644 "$src" \
-                  "$pkgdir/usr/share/bash-completion/completions/dms"
-                break
-              fi
-            done
-            for src in \
-              "$root/completion.fish" \
-              "$root/assets/completion.fish" \
-              "$root/completions/completion.fish"
-            do
-              if [[ -s "$src" ]]; then
-                install -Dm0644 "$src" \
-                  "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish"
-                break
-              fi
-            done
-            for src in \
-              "$root/completion.zsh" \
-              "$root/assets/completion.zsh" \
-              "$root/completions/completion.zsh"
-            do
-              if [[ -s "$src" ]]; then
-                install -Dm0644 "$src" \
-                  "$pkgdir/usr/share/zsh/site-functions/_dms"
-                break
-              fi
-            done
+            # Generate completions from the binary built from this same commit.
+            install -d "$pkgdir/usr/share/bash-completion/completions" \
+              "$pkgdir/usr/share/zsh/site-functions" \
+              "$pkgdir/usr/share/fish/vendor_completions.d"
+
+            "$root/core/dms" completion bash \
+              > "$pkgdir/usr/share/bash-completion/completions/dms"
+            "$root/core/dms" completion zsh \
+              > "$pkgdir/usr/share/zsh/site-functions/_dms"
+            "$root/core/dms" completion fish \
+              > "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish"
+
+            [[ -s "$pkgdir/usr/share/bash-completion/completions/dms" ]] ||
+              error "Bash completion generation produced an empty file"
+            [[ -s "$pkgdir/usr/share/zsh/site-functions/_dms" ]] ||
+              error "Zsh completion generation produced an empty file"
+            [[ -s "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish" ]] ||
+              error "Fish completion generation produced an empty file"
 
             if [[ -d "$root/docs" ]]; then
               install -d "$pkgdir/usr/share/doc/$pkgname/docs"
@@ -231,30 +222,35 @@ jobs:
           }
           PKGBUILD
 
-          chown builder:builder /home/builder/dms-build/PKGBUILD
+          chown -R builder:builder /home/builder/dms-build
 
-      - name: Cache ccache
+      - name: Cache Go module and build caches
         uses: actions/cache@v4
         with:
-          path: /home/builder/.ccache
-          key: dms-ccache-zen3-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          path: |
+            /home/builder/go/pkg/mod
+            /home/builder/.cache/go-build
+          key: dms-go-zen3-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
           restore-keys: |
-            dms-ccache-zen3-${{ runner.os }}-
+            dms-go-zen3-${{ runner.os }}-
 
       - name: Build Arch package
         shell: bash
         run: |
           set -euo pipefail
-          chown -R builder:builder /home/builder/.ccache
+          chown -R builder:builder /home/builder/dms-build
+          chown -R builder:builder /home/builder/go /home/builder/.cache/go-build
+
           su builder -s /bin/bash -c '
             set -euo pipefail
             cd /home/builder/dms-build
             export MAKEFLAGS="-j$(nproc)"
-            export CCACHE_DIR="/home/builder/.ccache"
-            export PATH="/usr/lib/ccache/bin:$PATH"
-            ccache --zero-stats || true
+            export GOPATH="/home/builder/go"
+            export GOMODCACHE="/home/builder/go/pkg/mod"
+            export GOCACHE="/home/builder/.cache/go-build"
+            export GOAMD64=v3
+            export GOTOOLCHAIN=local
             makepkg --syncdeps --cleanbuild --clean --noconfirm
-            ccache --show-stats || true
           '
 
       - name: Verify package and prepare release
@@ -275,16 +271,21 @@ jobs:
           echo "Package: $PKG_PATH"
           pacman -Qip "$PKG_PATH"
           bsdtar -tf "$PKG_PATH" > /tmp/package-contents.txt
-          grep -qx 'usr/bin/dms' /tmp/package-contents.txt || {
-            echo "ERROR: usr/bin/dms missing from package."
-            exit 1
-          }
-          grep -qx 'usr/share/doc/dms-shell-git/build-info.txt' /tmp/package-contents.txt || {
-            echo "ERROR: build-info.txt missing from package."
-            exit 1
-          }
+
+          for required in \
+            'usr/bin/dms' \
+            'usr/share/doc/dms-shell-git/build-info.txt' \
+            'usr/lib/systemd/user/dms.service' \
+            'usr/share/icons/hicolor/scalable/apps/dev.duxlabs.shell.svg'
+          do
+            grep -qx "$required" /tmp/package-contents.txt || {
+              echo "ERROR: Required package path missing: $required"
+              exit 1
+            }
+          done
+
           if grep -q '^usr/share/quickshell/' /tmp/package-contents.txt; then
-            echo "ERROR: Unexpected separate /usr/share/quickshell payload."
+            echo "ERROR: Unexpected separate Quickshell UI payload; DMS 2.x embeds the shell."
             exit 1
           fi
 
@@ -302,9 +303,8 @@ jobs:
             exit 1
           }
           readelf -h "$DMS" | grep -E 'Type:|Machine:|OS/ABI:'
-          readelf -d "$DMS" | grep NEEDED || true
-          readelf -d "$DMS" | grep -q 'libc.so.6' || {
-            echo "ERROR: Expected libc.so.6 dependency not found."
+          readelf -h "$DMS" | grep -Eq 'Type:[[:space:]]+DYN' || {
+            echo "ERROR: Expected a PIE (ELF DYN) executable."
             exit 1
           }
 
@@ -333,24 +333,23 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: dms-${{ steps.verify.outputs.commit }}
-          name: dms-shell-git ${{ steps.verify.outputs.version }} (Zen 3 / x86-64-v3)
+          name: dms-shell-git ${{ steps.verify.outputs.version }} (Dux Shell 2.x / Zen 3)
           overwrite_files: true
           fail_on_unmatched_files: true
           make_latest: true
           body: |
-            ## DankMaterialShell Git Build
+            ## Dux Shell (DMS) Git Build
 
             Built from upstream commit `${{ steps.verify.outputs.commit }}`.
 
             ### Build configuration
             - Architecture: `x86_64`
-            - CPU tuning: AMD Zen 3 (`-march=znver3 -mtune=znver3`)
-            - Go target: `GOAMD64=v3`
-            - CGO: enabled
+            - CPU target: `GOAMD64=v3` (x86-64-v3 / Zen 3 class)
+            - Minimum Go toolchain: `1.27.1`
+            - CGO: disabled, matching upstream's core build
             - PIE: enabled
-            - C optimization: `-O3`
-            - LTO: enabled for compatible native compilation stages
-            - DMS UI: embedded with upstream `make sync-shell`
+            - UI: embedded from upstream `quickshell/` using `make sync-shell`
+            - Source repository: `https://github.com/duxlabs-dev/dux-shell`
             - Package format: Arch Linux `.pkg.tar.zst`
 
             ### Installation
@@ -359,7 +358,7 @@ jobs:
             ```
 
             ### Compatibility
-            Requires an x86-64-v3-capable CPU; native compiler tuning targets AMD Zen 3.
+            Requires an x86-64-v3-capable CPU. The Go binary targets x86-64-v3; it is suitable for AMD Zen 3 systems.
           files: |
             /home/builder/release/*.pkg.tar.zst
             /home/builder/release/*.sha256
