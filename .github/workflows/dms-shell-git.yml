@@ -84,10 +84,10 @@ jobs:
           source=('git+https://github.com/duxlabs-dev/dux-shell.git')
           sha256sums=('SKIP')
 
-          _repo="$srcdir/dux-shell"
+          _repo_name="dux-shell"
 
           pkgver() {
-            cd "$_repo"
+            cd "$srcdir/$_repo_name"
             local desc
             desc="$(git describe --long --tags --match='v*' HEAD 2>/dev/null || true)"
             if [[ -n "$desc" ]]; then
@@ -99,13 +99,13 @@ jobs:
           }
 
           prepare() {
-            cd "$_repo"
+            cd "$srcdir/$_repo_name"
             git submodule sync --recursive
             git submodule update --init --recursive
           }
 
           build() {
-            cd "$_repo/core"
+            cd "$srcdir/$_repo_name/core"
 
             local go_version
             go_version="$(go version | awk '{print $3}' | sed 's/^go//')"
@@ -127,9 +127,9 @@ jobs:
             }
 
             local version build_time commit go_ldflags
-            version="$(git -C "$_repo" describe --tags --always 2>/dev/null || echo dev)"
-            build_time="$(git -C "$_repo" show -s --format='%cI' HEAD 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
-            commit="$(git -C "$_repo" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+            version="$(git -C "$srcdir/$_repo_name" describe --tags --always 2>/dev/null || echo dev)"
+            build_time="$(git -C "$srcdir/$_repo_name" show -s --format='%cI' HEAD 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            commit="$(git -C "$srcdir/$_repo_name" rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
             go_ldflags="-s -w -X main.Version=${version} -X main.buildTime=${build_time} -X main.commit=${commit}"
 
             # Match upstream's CGO-disabled build while enabling the distro
@@ -145,8 +145,8 @@ jobs:
 
             install -Dm0644 <(printf '%s\n' \
               "repository=https://github.com/duxlabs-dev/dux-shell" \
-              "commit=$(git -C "$_repo" rev-parse HEAD)" \
-              "commit_date=$(git -C "$_repo" show -s --format=%cI HEAD)" \
+              "commit=$(git -C "$srcdir/$_repo_name" rev-parse HEAD)" \
+              "commit_date=$(git -C "$srcdir/$_repo_name" show -s --format=%cI HEAD)" \
               "go_version=$(go version)" \
               "goamd64=$GOAMD64" \
               "cgo_enabled=$CGO_ENABLED" \
@@ -155,7 +155,7 @@ jobs:
           }
 
           package() {
-            local root="$_repo"
+            local root="$srcdir/$_repo_name"
             local desktop
 
             install -Dm0755 "$root/core/dms" "$pkgdir/usr/bin/dms"
