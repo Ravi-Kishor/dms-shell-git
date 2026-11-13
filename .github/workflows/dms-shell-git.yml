@@ -1,9 +1,9 @@
-name: Build Dux Shell (DMS 2.x latest upstream / Zen 3)
+#name: Build Dux Shell (DMS 2.x latest upstream / Zen 3)
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 */6 * * *"
+  #workflow_dispatch:
+  #schedule:
+    #- cron: "0 */6 * * *"
 
 permissions:
   contents: write
