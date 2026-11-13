@@ -1,0 +1,432 @@
+name: Build Dux Shell (DMS) - Zen 3
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if a release for the current upstream commit exists"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dms-shell-git-zen3-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/duxlabs-dev/dux-shell.git
+  GO_MIN_VERSION: "1.27.1"
+
+jobs:
+  check:
+    name: Resolve upstream and skip if already released
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+      short: ${{ steps.resolve.outputs.short }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      - name: Resolve upstream HEAD and check for existing release
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          COMMIT="$(git ls-remote "$UPSTREAM_REPO" HEAD | awk '{print $1}')"
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "ERROR: could not resolve upstream HEAD"
+            exit 1
+          }
+
+          SHORT="${COMMIT:0:8}"
+          TAG="dms-${SHORT}"
+          SKIP=false
+
+          if [[ "$FORCE" != "true" ]] && \
+             gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            SKIP=true
+          fi
+
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+          echo "Upstream: $COMMIT | Tag: $TAG | Skip: $SKIP"
+
+  build:
+    name: Build Arch package
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    env:
+      UPSTREAM_COMMIT: ${{ needs.check.outputs.commit }}
+      UPSTREAM_SHORT: ${{ needs.check.outputs.short }}
+
+    steps:
+      - name: Cache pacman package cache
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/pacman/pkg
+          key: pacman-zen3-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            pacman-zen3-${{ runner.os }}-
+
+      - name: Update base system and install build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm \
+            base-devel git go make curl binutils libarchive sudo file
+
+          echo "Installed toolchain:"
+          go version
+          git --version
+          make --version | head -n 1
+
+          GO_VERSION="$(go version | awk '{print $3}' | sed 's/^go//')"
+          if [[ "$(printf '%s\n' "$GO_MIN_VERSION" "$GO_VERSION" | sort -V | head -n 1)" != "$GO_MIN_VERSION" ]]; then
+            echo "ERROR: Dux Shell 2.x requires Go ${GO_MIN_VERSION} or newer; found ${GO_VERSION}."
+            exit 1
+          fi
+
+      - name: Create unprivileged package builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          useradd -m builder
+          printf 'builder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+          install -d -o builder -g builder /home/builder/dms-build
+          install -d -o builder -g builder /home/builder/go/pkg/mod
+          install -d -o builder -g builder /home/builder/.cache/go-build
+
+      - name: Generate PKGBUILD for Dux Shell 2.x
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /home/builder/dms-build/PKGBUILD <<'PKGBUILD'
+          pkgname=dms-shell-git
+          pkgver=0
+          pkgrel=1
+          pkgdesc='Desktop shell for Wayland compositors built with Quickshell and Go'
+          arch=('x86_64')
+          url='https://github.com/duxlabs-dev/dux-shell'
+          license=('MIT')
+
+          depends=('quickshell')
+          optdepends=(
+            'dux-gop: system telemetry for resource widgets'
+            'dux-calendar: calendar integration'
+            'dux-search: filesystem search integration'
+            'cava: audio visualizer'
+            'i2c-tools: external monitor brightness control'
+            'matugen: dynamic wallpaper-based theming'
+            'qt6-multimedia: sound effects'
+            'power-profiles-daemon: power profile control'
+            'qt6ct: Qt6 application theming'
+            'accountsservice: user account details'
+            'cups-pk-helper: printer management'
+          )
+          makedepends=('git' 'go' 'make')
+          provides=('dms-shell' 'dms-git')
+          conflicts=('dms-shell' 'dms-git')
+          # No separate debug package: the binary is stripped on purpose.
+          options=('!debug')
+
+          _repo_name="dux-shell"
+          # Pinned to the exact upstream commit resolved by the check job.
+          # @COMMIT@ is substituted by the workflow before makepkg runs.
+          source=("git+https://github.com/duxlabs-dev/dux-shell.git#commit=@COMMIT@")
+          sha256sums=('SKIP')
+
+          pkgver() {
+            cd "$srcdir/$_repo_name"
+            local desc
+            if desc="$(git describe --long --tags --match='v*' 2>/dev/null)"; then
+              printf '%s' "$desc" | sed 's/^v//;s/-\([0-9]*\)-g/.r\1.g/;s/-/./g'
+            else
+              printf '0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+            fi
+          }
+
+          prepare() {
+            cd "$srcdir/$_repo_name"
+            git submodule sync --recursive
+            git submodule update --init --recursive
+          }
+
+          build() {
+            local root="$srcdir/$_repo_name"
+            cd "$root/core"
+
+            local go_version
+            go_version="$(go version | awk '{print $3}' | sed 's/^go//')"
+            if [[ "$(printf '%s\n' '1.27.1' "$go_version" | sort -V | head -n 1)" != "1.27.1" ]]; then
+              error "Dux Shell 2.x requires Go 1.27.1 or newer; found ${go_version}"
+            fi
+
+            export GOAMD64=v3
+            export CGO_ENABLED=0
+            export GOTOOLCHAIN=local
+            export GOFLAGS='-trimpath'
+            export GOMAXPROCS="$(nproc)"
+
+            # Upstream core Makefile embeds the QML shell via this target.
+            make sync-shell
+            [[ -d internal/shellembed/dist ]] || {
+              error "Embedded shell directory missing after make sync-shell"
+            }
+
+            local version build_time commit go_ldflags
+            version="$(git -C "$root" describe --tags --always 2>/dev/null || echo dev)"
+            build_time="$(git -C "$root" show -s --format='%cI' HEAD)"
+            commit="$(git -C "$root" rev-parse --short=8 HEAD)"
+            go_ldflags="-s -w -X main.Version=${version} -X main.buildTime=${build_time} -X main.commit=${commit}"
+
+            go build \
+              -tags 'distro_binary withshell' \
+              -ldflags "$go_ldflags" \
+              -buildmode=pie \
+              -mod=readonly \
+              -modcacherw \
+              -o dms \
+              ./cmd/dms
+
+            # Write to a real file first (process substitution + install -D is fragile).
+            local info="$srcdir/build-info.txt"
+            {
+              echo "repository=${url}"
+              echo "commit=$(git -C "$root" rev-parse HEAD)"
+              echo "commit_date=$(git -C "$root" show -s --format=%cI HEAD)"
+              echo "go_version=$(go version)"
+              echo "goamd64=${GOAMD64}"
+              echo "cgo_enabled=${CGO_ENABLED}"
+              echo "build_tags=distro_binary withshell"
+            } > "$info"
+          }
+
+          package() {
+            local root="$srcdir/$_repo_name"
+            local desktop
+
+            install -Dm0755 "$root/core/dms" "$pkgdir/usr/bin/dms"
+            install -Dm0644 "$srcdir/build-info.txt" \
+              "$pkgdir/usr/share/doc/$pkgname/build-info.txt"
+            install -Dm0644 "$root/README.md" \
+              "$pkgdir/usr/share/doc/$pkgname/README.md"
+            install -Dm0644 "$root/LICENSE" \
+              "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+            if [[ -f "$root/assets/systemd/dms.service" ]]; then
+              install -Dm0644 "$root/assets/systemd/dms.service" \
+                "$pkgdir/usr/lib/systemd/user/dms.service"
+            else
+              error "Required upstream service missing: assets/systemd/dms.service"
+            fi
+
+            install -d "$pkgdir/usr/share/applications"
+            for desktop in \
+              dms-open.desktop \
+              dev.duxlabs.shell.desktop \
+              dev.duxlabs.shell.notepad.desktop
+            do
+              if [[ -s "$root/assets/$desktop" ]]; then
+                install -Dm0644 "$root/assets/$desktop" \
+                  "$pkgdir/usr/share/applications/$desktop"
+              elif [[ "$desktop" == "dms-open.desktop" ]]; then
+                error "Required desktop entry missing: assets/$desktop"
+              else
+                echo "INFO: optional desktop entry absent: assets/$desktop"
+              fi
+            done
+
+            if [[ -s "$root/assets/dev.duxlabs.shell.svg" ]]; then
+              install -Dm0644 "$root/assets/dev.duxlabs.shell.svg" \
+                "$pkgdir/usr/share/icons/hicolor/scalable/apps/dev.duxlabs.shell.svg"
+            else
+              error "Required upstream icon missing: assets/dev.duxlabs.shell.svg"
+            fi
+
+            # Completions generated from the binary built from this same commit.
+            install -d "$pkgdir/usr/share/bash-completion/completions" \
+              "$pkgdir/usr/share/zsh/site-functions" \
+              "$pkgdir/usr/share/fish/vendor_completions.d"
+
+            "$root/core/dms" completion bash \
+              > "$pkgdir/usr/share/bash-completion/completions/dms"
+            "$root/core/dms" completion zsh \
+              > "$pkgdir/usr/share/zsh/site-functions/_dms"
+            "$root/core/dms" completion fish \
+              > "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish"
+
+            [[ -s "$pkgdir/usr/share/bash-completion/completions/dms" ]] ||
+              error "Bash completion generation produced an empty file"
+            [[ -s "$pkgdir/usr/share/zsh/site-functions/_dms" ]] ||
+              error "Zsh completion generation produced an empty file"
+            [[ -s "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish" ]] ||
+              error "Fish completion generation produced an empty file"
+
+            if [[ -d "$root/docs" ]]; then
+              install -d "$pkgdir/usr/share/doc/$pkgname/docs"
+              cp -a "$root/docs/." "$pkgdir/usr/share/doc/$pkgname/docs/"
+            fi
+          }
+          PKGBUILD
+
+          # Pin the source to the commit resolved by the check job.
+          sed -i "s/@COMMIT@/${UPSTREAM_COMMIT}/" /home/builder/dms-build/PKGBUILD
+          grep -q "#commit=${UPSTREAM_COMMIT}\"" /home/builder/dms-build/PKGBUILD || {
+            echo "ERROR: commit pin was not applied to PKGBUILD"
+            exit 1
+          }
+
+          chown -R builder:builder /home/builder/dms-build
+
+      - name: Cache Go module and build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/builder/go/pkg/mod
+            /home/builder/.cache/go-build
+          key: dms-go-zen3-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            dms-go-zen3-${{ runner.os }}-
+
+      - name: Build Arch package
+        shell: bash
+        run: |
+          set -euo pipefail
+          chown -R builder:builder /home/builder/dms-build
+          chown -R builder:builder /home/builder/go /home/builder/.cache/go-build
+
+          su builder -s /bin/bash -c '
+            set -euo pipefail
+            cd /home/builder/dms-build
+            export MAKEFLAGS="-j$(nproc)"
+            export GOPATH="/home/builder/go"
+            export GOMODCACHE="/home/builder/go/pkg/mod"
+            export GOCACHE="/home/builder/.cache/go-build"
+            export GOAMD64=v3
+            export GOTOOLCHAIN=local
+            makepkg --syncdeps --cleanbuild --clean --noconfirm
+          '
+
+      - name: Verify package and prepare release
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_DIR=/home/builder/dms-build
+          PKG_PATH="$(find "$BUILD_DIR" -maxdepth 1 -type f \
+            -name 'dms-shell-git-*.pkg.tar.zst' \
+            ! -name 'dms-shell-git-debug-*' -print -quit)"
+          if [[ -z "$PKG_PATH" ]]; then
+            echo "ERROR: Main package not found."
+            ls -lah "$BUILD_DIR"
+            exit 1
+          fi
+
+          echo "Package: $PKG_PATH"
+          pacman -Qip "$PKG_PATH"
+          bsdtar -tf "$PKG_PATH" > /tmp/package-contents.txt
+
+          for required in \
+            'usr/bin/dms' \
+            'usr/share/doc/dms-shell-git/build-info.txt' \
+            'usr/lib/systemd/user/dms.service' \
+            'usr/share/icons/hicolor/scalable/apps/dev.duxlabs.shell.svg'
+          do
+            grep -qx "$required" /tmp/package-contents.txt || {
+              echo "ERROR: Required package path missing: $required"
+              exit 1
+            }
+          done
+
+          if grep -q '^usr/share/quickshell/' /tmp/package-contents.txt; then
+            echo "ERROR: Unexpected separate Quickshell UI payload; DMS 2.x embeds the shell."
+            exit 1
+          fi
+
+          VERIFY_DIR=/home/builder/package-check
+          rm -rf "$VERIFY_DIR"
+          mkdir -p "$VERIFY_DIR"
+          bsdtar -xf "$PKG_PATH" -C "$VERIFY_DIR"
+          DMS="$VERIFY_DIR/usr/bin/dms"
+
+          file "$DMS"
+          go version -m "$DMS" | grep -E \
+            'path|build|CGO_ENABLED|GOARCH|GOAMD64|GOOS|tags|trimpath|vcs.revision|vcs.time' || true
+          go version -m "$DMS" | grep -q 'GOAMD64=v3' || {
+            echo "ERROR: Binary is not GOAMD64=v3."
+            exit 1
+          }
+          readelf -h "$DMS" | grep -E 'Type:|Machine:|OS/ABI:'
+          readelf -h "$DMS" | grep -Eq 'Type:[[:space:]]+DYN' || {
+            echo "ERROR: Expected a PIE (ELF DYN) executable."
+            exit 1
+          }
+
+          COMMIT="$(sed -n 's/^commit=//p' \
+            "$VERIFY_DIR/usr/share/doc/dms-shell-git/build-info.txt")"
+          [[ "$COMMIT" == "$UPSTREAM_COMMIT" ]] || {
+            echo "ERROR: built commit $COMMIT does not match expected $UPSTREAM_COMMIT"
+            exit 1
+          }
+
+          sha256sum "$DMS"
+          sha256sum "$PKG_PATH" > "${PKG_PATH}.sha256"
+
+          RELEASE_DIR=/home/builder/release
+          rm -rf "$RELEASE_DIR"
+          mkdir -p "$RELEASE_DIR"
+          cp "$PKG_PATH" "${PKG_PATH}.sha256" "$RELEASE_DIR/"
+
+          VERSION="$(basename "$PKG_PATH" | sed -E \
+            's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst$/\1/')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          ls -lh "$RELEASE_DIR"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dms-${{ needs.check.outputs.short }}
+          name: dms-shell-git ${{ steps.verify.outputs.version }} (Dux Shell 2.x / Zen 3)
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: true
+          body: |
+            ## Dux Shell (DMS) Git Build
+
+            Built from upstream commit `${{ needs.check.outputs.commit }}`.
+
+            ### Build configuration
+            - Architecture: `x86_64`
+            - CPU target: `GOAMD64=v3` (x86-64-v3, Zen 3 / Cezanne class, e.g. Ryzen 5600GT)
+            - Minimum Go toolchain: `1.27.1`
+            - CGO: disabled, matching upstream's core build
+            - PIE: enabled
+            - UI: embedded from upstream `quickshell/` using `make sync-shell`
+            - Source repository: `https://github.com/duxlabs-dev/dux-shell`
+            - Package format: Arch Linux `.pkg.tar.zst`
+
+            ### Installation
+            ```bash
+            sudo pacman -U dms-shell-git-*.pkg.tar.zst
+            ```
+
+            ### Compatibility
+            Requires an x86-64-v3-capable CPU (AVX2, BMI2, FMA). AVX-512 is not used.
+          files: |
+            /home/builder/release/*.pkg.tar.zst
+            /home/builder/release/*.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
