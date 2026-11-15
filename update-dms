@@ -2,7 +2,8 @@
 set -euo pipefail
 
 REPO="Ravi-Kishor/dms-shell-git"
-PKG_NAME="dms-shell-git"
+PKG_NAME="dux-shell"
+OLD_PKG_NAME="dms-shell-git"
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -18,12 +19,15 @@ require sudo
 require pacman
 
 get_installed_version() {
-  pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || echo "Not Installed"
+  pacman -Q "$1" 2>/dev/null | awk '{print $2}' || echo "Not Installed"
 }
 
-INSTALLED_VERSION=$(get_installed_version)
+INSTALLED_VERSION=$(get_installed_version "$PKG_NAME")
+OLD_INSTALLED_VERSION=$(get_installed_version "$OLD_PKG_NAME")
 
-echo "Installed package version: $INSTALLED_VERSION"
+echo "Installed $PKG_NAME version: $INSTALLED_VERSION"
+echo "Installed old package version: $OLD_INSTALLED_VERSION"
+echo
 echo "📡 Fetching latest release metadata…"
 
 RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
@@ -31,30 +35,35 @@ RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
 TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
 echo "Latest release tag: $TAG_NAME"
 
-# Prefer x86_64_v3, fallback to generic
+# Prefer x86_64_v3, fallback to generic x86_64.
 ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '
   .assets[]
-  | select(.name | test("^dms-shell-git-.*-x86_64_v3\\.pkg\\.tar\\.zst$"))
+  | select(.name | test("^dux-shell-.*-x86_64_v3\\.pkg\\.tar\\.zst$"))
   | .browser_download_url
 ' | head -n1)
 
 if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
   ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '
     .assets[]
-    | select(.name | test("^dms-shell-git-.*-x86_64\\.pkg\\.tar\\.zst$"))
+    | select(.name | test("^dux-shell-.*-x86_64\\.pkg\\.tar\\.zst$"))
     | .browser_download_url
   ' | head -n1)
 fi
 
 if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
-  echo "❌ Could not find dms-shell-git package in release $TAG_NAME"
+  echo "❌ Could not find dux-shell package in release $TAG_NAME"
   exit 1
 fi
 
 PKG_FILE=$(basename "$ASSET_URL")
 
 LATEST_VERSION=$(echo "$PKG_FILE" | sed -E \
-  's/^dms-shell-git-(.*)-x86_64(_v3)?\.pkg\.tar\.zst/\1/')
+  's/^dux-shell-(.*)-x86_64(_v3)?\.pkg\.tar\.zst$/\1/')
+
+if [[ "$LATEST_VERSION" == "$PKG_FILE" ]]; then
+  echo "❌ Could not extract package version from $PKG_FILE"
+  exit 1
+fi
 
 echo "Latest package version: $LATEST_VERSION"
 echo
@@ -66,18 +75,23 @@ read -rp "Enter choice (1/2): " CHOICE
 
 if [[ "$CHOICE" == "1" ]]; then
   if [[ "$INSTALLED_VERSION" == "$LATEST_VERSION" ]]; then
-    echo "✅ dms-shell-git is already up to date"
+    echo "✅ dux-shell is already up to date"
     exit 0
   fi
-  echo "⬆️ Updating dms-shell-git $INSTALLED_VERSION → $LATEST_VERSION"
+
+  echo "⬆️ Updating dux-shell $INSTALLED_VERSION → $LATEST_VERSION"
+
 elif [[ "$CHOICE" == "2" ]]; then
-  echo "🛠️ Force installing dms-shell-git $LATEST_VERSION"
+  echo "🛠️ Force installing dux-shell $LATEST_VERSION"
+
 else
   echo "❌ Invalid choice"
   exit 1
 fi
 
 TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
 cd "$TMP_DIR"
 
 echo "📥 Downloading (8 connections with aria2)..."
@@ -86,10 +100,14 @@ echo "   $PKG_FILE"
 aria2c -x 8 -s 8 -k 1M -o "$PKG_FILE" "$ASSET_URL"
 
 echo "📦 Installing package..."
+
+if [[ "$OLD_INSTALLED_VERSION" != "Not Installed" ]]; then
+  echo "🔄 Replacing old package: $OLD_PKG_NAME"
+
+  sudo pacman -R --noconfirm "$OLD_PKG_NAME"
+fi
+
 sudo pacman -U --noconfirm "$PKG_FILE"
 
-cd /
-rm -rf "$TMP_DIR"
-
 echo
-echo "✅ dms-shell-git $LATEST_VERSION installed successfully!"
+echo "✅ dux-shell $LATEST_VERSION installed successfully!"
