@@ -86,11 +86,13 @@ jobs:
           git --version
           make --version | head -n 1
 
-          GO_VERSION="$(go version | awk '{print $3}' | sed 's/^go//')"
-          if [[ "$(printf '\%s\n' "$GO_MIN_VERSION" "$GO_VERSION" \vert{} sort -V \vert{} head -n 1)" != "$GO_MIN_VERSION" ]]; then
+          # Strip Arch's "-X:nodwarf5" experiment suffix before comparing
+          GO_VERSION="$(go env GOVERSION | sed -E 's/^go([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/')"
+          if (( $(vercmp "$GO_VERSION" "$GO_MIN_VERSION") < 0 )); then
             echo "ERROR: Dux Shell 2.x requires Go ${GO_MIN_VERSION} or newer; found${GO_VERSION}."
             exit 1
           fi
+          echo "Verified Go version: ${GO_VERSION} (>=${GO_MIN_VERSION})"
 
           useradd -m builder
           install -d -o builder -g builder \
@@ -113,5 +115,191 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Shallow blobless clone: preserves commit/tag graph for pkgver() without historical blobs
           git clone --filter=blob:none --no-checkout "$UPSTREAM_REPO" /home/builder/dms-build/src/dux-shell
+          git -C /home/builder/dms-build/src/dux-shell checkout --detach "$UPSTREAM_COMMIT"
+          git -C /home/builder/dms-build/src/dux-shell submodule update --init --recursive --depth 1
+
+          cat > /home/builder/dms-build/PKGBUILD <<'PKGBUILD'
+          pkgname=dux-shell
+          pkgver=0
+          pkgrel=1
+          pkgdesc='Dux Shell - Desktop shell for Wayland compositors built with dux-qt-base and Go (Zen 3 / 5600GT)'
+          arch=('x86_64')
+          url='https://github.com/duxlabs-dev/dux-shell'
+          license=('MIT')
+
+          depends=('dux-qt-base')
+          optdepends=(
+            'dux-gop: system telemetry for resource widgets'
+            'dux-calendar: calendar integration'
+            'dux-search: filesystem search integration'
+            'cava: audio visualizer'
+            'i2c-tools: external monitor brightness control'
+            'matugen: dynamic wallpaper-based theming'
+            'qt6-multimedia: sound effects'
+            'power-profiles-daemon: power profile control'
+            'qt6ct: Qt6 application theming'
+            'accountsservice: user account details'
+            'cups-pk-helper: printer management'
+          )
+          makedepends=('git' 'go' 'make')
+          provides=('dms-shell' 'dms-git' 'dms-shell-git')
+          conflicts=('dms-shell' 'dms-git' 'dms-shell-git')
+
+          # No separate debug package: the binary is stripped on purpose.
+          options=('!debug' '!lto')
+
+          _repo_name="dux-shell"
+
+          pkgver() {
+            cd "$srcdir/$_repo_name"
+            local desc
+            if desc="$(git describe --long --tags --match='v*' 2>/dev/null)"; then
+              printf '%s' "$desc" | sed 's/^v//;s/-\([0-9]*\)-g/.r\1.g/;s/-/./g'
+            else
+              printf '0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+            fi
+          }
+
+          build() {
+            local root="$srcdir/$_repo_name"
+            cd "$root/core"
+
+            export GOAMD64=v3
+            export CGO_ENABLED=0
+            export GOTOOLCHAIN=local
+            export GOFLAGS='-trimpath'
+            export GOMAXPROCS="$(nproc)"
+
+            # Upstream core Makefile embeds the QML shell via this target.
+            make sync-shell
+            [[ -d internal/shellembed/dist ]] || {
+              error "Embedded shell directory missing after make sync-shell"
+            }
+
+            local version build_time commit go_ldflags
+            version="$(git -C "$root" describe --tags --always 2>/dev/null || echo dev)"
+            build_time="$(git -C "$root" show -s --format='%cI' HEAD)"
+            commit="$(git -C "$root" rev-parse --short=8 HEAD)"
+            go_ldflags="-s -w -X main.Version=${version} -X main.buildTime=${build_time} -X main.commit=${commit}"
+
+            go build \
+              -tags 'distro_binary withshell' \
+              -pgo=auto \
+              -ldflags "$go_ldflags" \
+              -buildmode=pie \
+              -mod=readonly \
+              -modcacherw \
+              -o dms \
+              ./cmd/dms
+
+            local info="$srcdir/build-info.txt"
+            {
+              echo "repository=${url}"
+              echo "commit=$(git -C "$root" rev-parse HEAD)"
+              echo "commit_date=${build_time}"
+              echo "go_version=$(go version)"
+              echo "goamd64=${GOAMD64}"
+              echo "cgo_enabled=${CGO_ENABLED}"
+              echo "build_tags=distro_binary withshell"
+            } > "$info"
+          }
+
+          package() {
+            local root="$srcdir/$_repo_name"
+            local desktop
+
+            install -Dm0755 "$root/core/dms" "$pkgdir/usr/bin/dms"
+            install -Dm0644 "$srcdir/build-info.txt" \
+              "$pkgdir/usr/share/doc/$pkgname/build-info.txt"
+            install -Dm0644 "$root/README.md" \
+              "$pkgdir/usr/share/doc/$pkgname/README.md"
+            install -Dm0644 "$root/LICENSE" \
+              "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+            if [[ -f "$root/assets/systemd/dms.service" ]]; then
+              install -Dm0644 "$root/assets/systemd/dms.service" \
+                "$pkgdir/usr/lib/systemd/user/dms.service"
+              # APU memory optimization (Ryzen 5600GT): cap background Go heap growth
+              # and enable threaded Qt scene graph rendering
+              sed -i '/^[Service]/a Environment="GOGC=75" "GOMEMLIMIT=150MiB" "QSG_RENDER_LOOP=threaded"' \
+                "$pkgdir/usr/lib/systemd/user/dms.service"
+            else
+              error "Required upstream service missing: assets/systemd/dms.service"
+            fi
+
+            install -d "$pkgdir/usr/share/applications"
+            for desktop in \
+              dms-open.desktop \
+              dev.duxlabs.shell.desktop \
+              dev.duxlabs.shell.notepad.desktop
+            do
+              if [[ -s "$root/assets/$desktop" ]]; then
+                install -Dm0644 "$root/assets/$desktop" \
+                  "$pkgdir/usr/share/applications/$desktop"
+              elif [[ "$desktop" == "dms-open.desktop" ]]; then
+                error "Required desktop entry missing: assets/$desktop"
+              else
+                echo "INFO: optional desktop entry absent: assets/$desktop"
+              fi
+            done
+
+            if [[ -s "$root/assets/dev.duxlabs.shell.svg" ]]; then
+              install -Dm0644 "$root/assets/dev.duxlabs.shell.svg" \
+                "$pkgdir/usr/share/icons/hicolor/scalable/apps/dev.duxlabs.shell.svg"
+            else
+              error "Required upstream icon missing: assets/dev.duxlabs.shell.svg"
+            fi
+
+            install -d "$pkgdir/usr/share/bash-completion/completions" \
+              "$pkgdir/usr/share/zsh/site-functions" \
+              "$pkgdir/usr/share/fish/vendor_completions.d"
+
+            "$root/core/dms" completion bash \
+              > "$pkgdir/usr/share/bash-completion/completions/dms"
+            "$root/core/dms" completion zsh \
+              > "$pkgdir/usr/share/zsh/site-functions/_dms"
+            "$root/core/dms" completion fish \
+              > "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish"
+
+            for comp in \
+              "$pkgdir/usr/share/bash-completion/completions/dms" \
+              "$pkgdir/usr/share/zsh/site-functions/_dms" \
+              "$pkgdir/usr/share/fish/vendor_completions.d/dms.fish"
+            do
+              [[ -s "$comp" ]] || error "Completion generation produced an empty file: $comp"
+            done
+
+            if [[ -d "$root/docs" ]]; then
+              install -d "$pkgdir/usr/share/doc/$pkgname/docs"
+              cp -a "$root/docs/." "$pkgdir/usr/share/doc/$pkgname/docs/"
+            fi
+          }
+          PKGBUILD
+
+          chown -R builder:builder /home/builder
+
+      - name: Build Arch package
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^COMPRESSZST=.*/COMPRESSZST=(zstd -c -T0 --ultra -22 -)/' /etc/makepkg.conf
+
+          su builder -s /bin/bash -c '
+            set -euo pipefail
+            cd /home/builder/dms-build
+            export PACKAGER="Ravi Kishor <github@ravi>"
+            export MAKEFLAGS="-j$(nproc)"
+            export GOPATH="/home/builder/go"
+            export GOMODCACHE="/home/builder/go/pkg/mod"
+            export GOCACHE="/home/builder/.cache/go-build"
+            export GOAMD64=v3
+            export GOTOOLCHAIN=local
+            makepkg --nodeps --noextract --clean --noconfirm
+          '
+
+      - name: Verify package and prepare release
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
