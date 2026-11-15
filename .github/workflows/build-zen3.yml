@@ -59,7 +59,7 @@ jobs:
             echo "short=$SHORT"
             echo "skip=$SKIP"
           } >> "$GITHUB_OUTPUT"
-          echo "Upstream: $COMMIT | Tag: $TAG \vert{} Skip:$SKIP"
+          echo "Upstream: $COMMIT | Tag: $TAG | Skip: $SKIP"
 
   build:
     name: Build Arch package (Zen 3 / 5600GT)
@@ -89,10 +89,10 @@ jobs:
           # Strip Arch's "-X:nodwarf5" experiment suffix before comparing
           GO_VERSION="$(go env GOVERSION | sed -E 's/^go([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/')"
           if (( $(vercmp "$GO_VERSION" "$GO_MIN_VERSION") < 0 )); then
-            echo "ERROR: Dux Shell 2.x requires Go ${GO_MIN_VERSION} or newer; found${GO_VERSION}."
+            echo "ERROR: Dux Shell 2.x requires Go ${GO_MIN_VERSION} or newer; found ${GO_VERSION}."
             exit 1
           fi
-          echo "Verified Go version: ${GO_VERSION} (>=${GO_MIN_VERSION})"
+          echo "Verified Go version: ${GO_VERSION} (>= ${GO_MIN_VERSION})"
 
           useradd -m builder
           install -d -o builder -g builder \
@@ -222,7 +222,7 @@ jobs:
                 "$pkgdir/usr/lib/systemd/user/dms.service"
               # APU memory optimization (Ryzen 5600GT): cap background Go heap growth
               # and enable threaded Qt scene graph rendering
-              sed -i '/^[Service]/a Environment="GOGC=75" "GOMEMLIMIT=150MiB" "QSG_RENDER_LOOP=threaded"' \
+              sed -i '/^\[Service\]/a Environment="GOGC=75" "GOMEMLIMIT=150MiB" "QSG_RENDER_LOOP=threaded"' \
                 "$pkgdir/usr/lib/systemd/user/dms.service"
             else
               error "Required upstream service missing: assets/systemd/dms.service"
@@ -303,3 +303,117 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          BUILD_DIR=/home/builder/dms-build
+
+          PKG_PATH="$(find "$BUILD_DIR" -maxdepth 1 -type f \
+            -name 'dux-shell-*.pkg.tar.zst' \
+            ! -name 'dux-shell-debug-*' -print -quit)"
+
+          if [[ -z "$PKG_PATH" ]]; then
+            echo "ERROR: Main package not found."
+            ls -lah "$BUILD_DIR"
+            exit 1
+          fi
+
+          echo "Package: $PKG_PATH"
+          pacman -Qip "$PKG_PATH"
+          bsdtar -tf "$PKG_PATH" > /tmp/package-contents.txt
+
+          for required in \
+            'usr/bin/dms' \
+            'usr/share/doc/dux-shell/build-info.txt' \
+            'usr/lib/systemd/user/dms.service' \
+            'usr/share/icons/hicolor/scalable/apps/dev.duxlabs.shell.svg'
+          do
+            grep -qx "$required" /tmp/package-contents.txt || {
+              echo "ERROR: Required package path missing: $required"
+              exit 1
+            }
+          done
+
+          if grep -q '^usr/share/quickshell/' /tmp/package-contents.txt; then
+            echo "ERROR: Unexpected separate Quickshell UI payload; DMS 2.x embeds the shell."
+            exit 1
+          fi
+
+          VERIFY_DIR=/home/builder/package-check
+          rm -rf "$VERIFY_DIR"
+          mkdir -p "$VERIFY_DIR"
+          bsdtar -xf "$PKG_PATH" -C "$VERIFY_DIR"
+          DMS="$VERIFY_DIR/usr/bin/dms"
+
+          file "$DMS"
+          go version -m "$DMS" | grep -E \
+            'path|build|CGO_ENABLED|GOARCH|GOAMD64|GOOS|tags|trimpath|vcs.revision|vcs.time' || true
+
+          go version -m "$DMS" | grep -q 'GOAMD64=v3' || {
+            echo "ERROR: Binary is not GOAMD64=v3."
+            exit 1
+          }
+
+          readelf -h "$DMS" | grep -E 'Type:|Machine:|OS/ABI:'
+          readelf -h "$DMS" | grep -Eq 'Type:[[:space:]]+DYN' || {
+            echo "ERROR: Expected a PIE (ELF DYN) executable."
+            exit 1
+          }
+
+          COMMIT="$(sed -n 's/^commit=//p' \
+            "$VERIFY_DIR/usr/share/doc/dux-shell/build-info.txt")"
+
+          [[ "$COMMIT" == "$UPSTREAM_COMMIT" ]] || {
+            echo "ERROR: built commit $COMMIT does not match expected $UPSTREAM_COMMIT"
+            exit 1
+          }
+
+          sha256sum "$DMS"
+          sha256sum "$PKG_PATH" > "${PKG_PATH}.sha256"
+
+          RELEASE_DIR=/home/builder/release
+          rm -rf "$RELEASE_DIR"
+          mkdir -p "$RELEASE_DIR"
+          cp "$PKG_PATH" "${PKG_PATH}.sha256" "$RELEASE_DIR/"
+
+          VERSION="$(basename "$PKG_PATH" | sed -E \
+            's/^dux-shell-(.*)-x86_64\.pkg\.tar\.zst$/\1/')"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          ls -lh "$RELEASE_DIR"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dms-${{ needs.check.outputs.short }}
+          name: dux-shell ${{ steps.verify.outputs.version }} (Zen 3)
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: true
+          body: |
+            ## Dux Shell - Arch Linux Package
+
+            Built from upstream commit `${{ needs.check.outputs.commit }}`.
+
+            ### Build configuration
+            - Architecture: `x86_64`
+            - CPU target: `GOAMD64=v3` (x86-64-v3, Zen 3 / Cezanne class, e.g. Ryzen 5 5600GT)
+            - Runtime dependency: `dux-qt-base` (`libdux-qt-base.so`)
+            - Minimum Go toolchain: `1.27.1`
+            - CGO: disabled, matching upstream's core build
+            - PIE: enabled (`-pgo=auto`)
+            - UI: embedded from upstream `quickshell/` using `make sync-shell`
+            - Service tuning: `GOGC=75`, `GOMEMLIMIT=150MiB`, `QSG_RENDER_LOOP=threaded`
+            - Source repository: `https://github.com/duxlabs-dev/dux-shell`
+            - Arch package name: `dux-shell`
+            - Package format: `.pkg.tar.zst`
+
+            ### Installation
+            ```bash
+            sudo pacman -U dux-shell-*.pkg.tar.zst
+            ```
+
+            ### Compatibility
+            Requires an x86-64-v3-capable CPU (AVX2, BMI2, FMA) and `dux-qt-base` installed.
+          files: |
+            /home/builder/release/*.pkg.tar.zst
+            /home/builder/release/*.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
