@@ -139,7 +139,6 @@ jobs:
           makedepends=('git' 'go' 'make')
           provides=('dms-shell' 'dms-git' 'dms-shell-git')
           conflicts=('dms-shell' 'dms-git' 'dms-shell-git')
-          replaces=('dms-shell-git')
 
           # No separate debug package: the binary is stripped on purpose.
           options=('!debug')
