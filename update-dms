@@ -1,197 +1,116 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
-# ==============================================================================
-# Configuration
-# ==============================================================================
-REPO="${DMS_REPO:-Ravi-Kishor/dms-shell-git}"
+REPO="Ravi-Kishor/dms-shell-git"
 PKG_NAME="dux-shell"
-LEGACY_PKGS=("dms-shell-git" "dms-git" "dms-shell")
-API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+OLD_PKG_NAME="dms-shell-git"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
-
-# ==============================================================================
-# Helper Functions
-# ==============================================================================
-cleanup() {
-    if [[ -n "${TMP_DIR:-}" && -d "${TMP_DIR:-}" ]]; then
-        rm -rf "$TMP_DIR"
-    fi
-}
-trap cleanup EXIT
-
-# Exact package name check (ignores virtual 'provides' so dux-shell doesn't match dms-shell-git)
-is_exact_pkg_installed() {
-    local target="$1"
-    pacman -Qq | grep -qx "$target"
-}
-
-get_installed_version() {
-    if is_exact_pkg_installed "$PKG_NAME"; then
-        pacman -Q "$PKG_NAME" | awk '{print $2}'
-        return
-    fi
-
-    for legacy in "${LEGACY_PKGS[@]}"; do
-        if is_exact_pkg_installed "$legacy"; then
-            pacman -Q "$legacy" | awk '{print $2}'
-            return
-        fi
-    done
-
-    echo "none"
-}
-
-extract_remote_version() {
-    local filename="$1"
-    echo "$filename" | sed -E "s/^${PKG_NAME}-(.*)-(x86_64|any)\.pkg\.tar\.zst$/\1/"
-}
-
-download_file() {
-    local url="$1"
-    local dest="$2"
-    if command -v aria2c >/dev/null 2>&1; then
-        aria2c -x 16 -s 16 -k 1M --console-log-level=warn --summary-interval=0 \
-            -d "$(dirname "$dest")" -o "$(basename "$dest")" "$url"
-    else
-        curl -fL --progress-bar -o "$dest" "$url"
-    fi
-}
-
-# ==============================================================================
-# Main Flow
-# ==============================================================================
-echo -e "${BLUE}🔍 Checking latest ${PKG_NAME} release from ${REPO}...${NC}"
-
-RELEASE_JSON="$(curl -fsSL "$API_URL")"
-
-# Filter out -debug packages and pick the main .pkg.tar.zst asset
-PKG_URL="$(echo "$RELEASE_JSON" | jq -r '
-    .assets[]
-    | select(.name | test("^dux-shell-.*\\.pkg\\.tar\\.zst$"))
-    | select(.name | test("-debug-") | not)
-    | .browser_download_url
-' | head -n 1)"
-
-SHA_URL="$(echo "$RELEASE_JSON" | jq -r '
-    .assets[]
-    | select(.name | test("^dux-shell-.*\\.pkg\\.tar\\.zst\\.sha256$"))
-    | select(.name | test("-debug-") | not)
-    | .browser_download_url
-' | head -n 1)"
-
-if [[ -z "$PKG_URL" || "$PKG_URL" == "null" ]]; then
-    echo -e "${RED}❌ Error: Could not find a valid ${PKG_NAME} package in the latest release.${NC}"
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "❌ Required command '$1' not found"
     exit 1
+  }
+}
+
+require aria2c
+require curl
+require jq
+require sudo
+require pacman
+
+# Match exact installed package name in column 1 (ignores virtual 'provides')
+get_installed_version() {
+  pacman -Q 2>/dev/null | awk -v pkg="$1" '$1 == pkg {print $2; found=1; exit} END {if (!found) print "Not Installed"}'
+}
+
+INSTALLED_VERSION=$(get_installed_version "$PKG_NAME")
+OLD_INSTALLED_VERSION=$(get_installed_version "$OLD_PKG_NAME")
+
+echo "Installed $PKG_NAME version: $INSTALLED_VERSION"
+echo "Installed old package version: $OLD_INSTALLED_VERSION"
+echo
+echo "📡 Fetching latest release metadata…"
+
+RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
+
+TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+echo "Latest release tag: $TAG_NAME"
+
+# Prefer x86_64_v3, fallback to generic x86_64 (excluding -debug packages).
+ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '
+  .assets[]
+  | select(.name | test("^dux-shell-.*-x86_64_v3\\.pkg\\.tar\\.zst$"))
+  | select(.name | test("-debug-") | not)
+  | .browser_download_url
+' | head -n1)
+
+if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
+  ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '
+    .assets[]
+    | select(.name | test("^dux-shell-.*-x86_64\\.pkg\\.tar\\.zst$"))
+    | select(.name | test("-debug-") | not)
+    | .browser_download_url
+  ' | head -n1)
 fi
 
-PKG_FILENAME="$(basename "$PKG_URL")"
-REMOTE_VER="$(extract_remote_version "$PKG_FILENAME")"
-INSTALLED_VER="$(get_installed_version)"
+if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
+  echo "❌ Could not find dux-shell package in release $TAG_NAME"
+  exit 1
+fi
 
-echo -e "------------------------------------------------------------"
-echo -e " 📦 Package           : ${BOLD}${PKG_NAME}${NC}"
-echo -e " 💻 Installed Version : ${YELLOW}${INSTALLED_VER}${NC}"
-echo -e " 🌐 Latest Version    : ${GREEN}${REMOTE_VER}${NC}"
-echo -e "------------------------------------------------------------"
+PKG_FILE=$(basename "$ASSET_URL")
 
-# ==============================================================================
-# Interactive User Choice Menu
-# ==============================================================================
-if [[ "$INSTALLED_VER" == "none" ]]; then
-    echo -e "${CYAN}⚠️  ${PKG_NAME} is not currently installed.${NC}"
-    echo -e "  1) Install ${PKG_NAME} (${REMOTE_VER})"
-    echo -e "  2) Cancel / Exit"
-    read -rp "👉 Select an option [1-2, default: 1]: " choice
-    case "${choice:-1}" in
-        1) echo -e "${GREEN}🚀 Proceeding with installation...${NC}" ;;
-        *) echo "Exiting."; exit 0 ;;
-    esac
+LATEST_VERSION=$(echo "$PKG_FILE" | sed -E \
+  's/^dux-shell-(.*)-x86_64(_v3)?\.pkg\.tar\.zst$/\1/')
+
+if [[ "$LATEST_VERSION" == "$PKG_FILE" ]]; then
+  echo "❌ Could not extract package version from $PKG_FILE"
+  exit 1
+fi
+
+echo "Latest package version: $LATEST_VERSION"
+echo
+
+echo "Choose an action:"
+echo "1) Update (skip if already latest)"
+echo "2) Force install"
+read -rp "Enter choice (1/2): " CHOICE
+
+if [[ "$CHOICE" == "1" ]]; then
+  if [[ "$INSTALLED_VERSION" == "$LATEST_VERSION" ]]; then
+    echo "✅ dux-shell is already up to date"
+    exit 0
+  fi
+
+  echo "⬆️ Updating dux-shell $INSTALLED_VERSION → $LATEST_VERSION"
+
+elif [[ "$CHOICE" == "2" ]]; then
+  echo "🛠️ Force installing dux-shell $LATEST_VERSION"
+
 else
-    CMP="$(vercmp "$REMOTE_VER" "$INSTALLED_VER")"
-    if (( CMP > 0 )); then
-        echo -e "${GREEN}🚀 A newer version is available!${NC}"
-        echo -e "  1) Update to ${REMOTE_VER}"
-        echo -e "  2) Cancel / Exit"
-        read -rp "👉 Select an option [1-2, default: 1]: " choice
-        case "${choice:-1}" in
-            1) echo -e "${GREEN}⚡ Proceeding with update...${NC}" ;;
-            *) echo "Update cancelled."; exit 0 ;;
-        esac
-    elif (( CMP == 0 )); then
-        echo -e "${GREEN}✅ You already have the latest version installed.${NC}"
-        echo -e "  1) Force reinstall (${REMOTE_VER})"
-        echo -e "  2) Exit"
-        read -rp "👉 Select an option [1-2, default: 2]: " choice
-        case "${choice:-2}" in
-            1) echo -e "${YELLOW}🔄 Force reinstalling ${REMOTE_VER}...${NC}" ;;
-            *) echo "Nothing to do. Exiting."; exit 0 ;;
-        esac
-    else
-        echo -e "${YELLOW}⚠️  Installed version (${INSTALLED_VER}) is newer than remote (${REMOTE_VER}).${NC}"
-        echo -e "  1) Force downgrade / reinstall to ${REMOTE_VER}"
-        echo -e "  2) Exit"
-        read -rp "👉 Select an option [1-2, default: 2]: " choice
-        case "${choice:-2}" in
-            1) echo -e "${YELLOW}🔄 Downgrading to ${REMOTE_VER}...${NC}" ;;
-            *) echo "Exiting."; exit 0 ;;
-        esac
-    fi
+  echo "❌ Invalid choice"
+  exit 1
 fi
 
-# ==============================================================================
-# Download & Verify
-# ==============================================================================
-TMP_DIR="$(mktemp -d)"
-PKG_PATH="${TMP_DIR}/${PKG_FILENAME}"
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
 
-echo -e "\n${BLUE}⬇️  Downloading ${PKG_FILENAME}...${NC}"
-download_file "$PKG_URL" "$PKG_PATH"
+cd "$TMP_DIR"
 
-if [[ -n "$SHA_URL" && "$SHA_URL" != "null" ]]; then
-    echo -e "${BLUE}🔐 Verifying SHA256 checksum...${NC}"
-    SHA_PATH="${PKG_PATH}.sha256"
-    curl -fsSL -o "$SHA_PATH" "$SHA_URL"
-    expected_sum="$(awk '{print $1}' "$SHA_PATH")"
-    actual_sum="$(sha256sum "$PKG_PATH" | awk '{print $1}')"
-    if [[ "$expected_sum" != "$actual_sum" ]]; then
-        echo -e "${RED}❌ SHA256 mismatch! Expected ${expected_sum}, got ${actual_sum}.${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}✓ Checksum verified.${NC}"
+echo "📥 Downloading (8 connections with aria2)..."
+echo "   $PKG_FILE"
+
+aria2c -x 8 -s 8 -k 1M -o "$PKG_FILE" "$ASSET_URL"
+
+echo "📦 Installing package..."
+
+if [[ "$OLD_INSTALLED_VERSION" != "Not Installed" ]]; then
+  echo "🔄 Replacing old package: $OLD_PKG_NAME"
+
+  sudo pacman -Rdd --noconfirm "$OLD_PKG_NAME"
 fi
 
-# ==============================================================================
-# Install & Service Restart Choice
-# ==============================================================================
-echo -e "\n${BLUE}📦 Installing package...${NC}"
+sudo pacman -U --noconfirm "$PKG_FILE"
 
-# Only remove legacy package if the actual package name (not virtual provides) is installed
-for legacy in "${LEGACY_PKGS[@]}"; do
-    if is_exact_pkg_installed "$legacy"; then
-        echo -e "${YELLOW}🔄 Removing legacy package: ${legacy}${NC}"
-        sudo pacman -Rdd --noconfirm "$legacy"
-    fi
-done
-
-sudo pacman -U "$PKG_PATH"
-
-if systemctl --user list-unit-files dms.service >/dev/null 2>&1; then
-    systemctl --user daemon-reload
-    echo ""
-    read -rp "🔄 Restart dms.service now to apply changes? [Y/n]: " restart_choice
-    if [[ "${restart_choice:-Y}" =~ ^[Yy]$ ]]; then
-        systemctl --user restart dms.service
-        echo -e "${GREEN}✓ dms.service restarted.${NC}"
-    fi
-fi
-
-echo -e "\n${GREEN}🎉 Done! ${PKG_NAME} (${REMOTE_VER}) is ready.${NC}"
+echo
+echo "✅ dux-shell $LATEST_VERSION installed successfully!"
