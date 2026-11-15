@@ -1,4 +1,5 @@
-name: Build Dux Shell (DMS) - Zen 3
+```yaml
+name: Build Dux Shell - Zen 3
 
 on:
   workflow_dispatch:
@@ -14,7 +15,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: dms-shell-git-zen3-release
+  group: dux-shell-zen3-release
   cancel-in-progress: false
 
 env:
@@ -114,10 +115,10 @@ jobs:
         run: |
           set -euo pipefail
           cat > /home/builder/dms-build/PKGBUILD <<'PKGBUILD'
-          pkgname=dms-shell-git
+          pkgname=dux-shell
           pkgver=0
           pkgrel=1
-          pkgdesc='Desktop shell for Wayland compositors built with Quickshell and Go'
+          pkgdesc='Dux Shell - Desktop shell for Wayland compositors built with Quickshell and Go'
           arch=('x86_64')
           url='https://github.com/duxlabs-dev/dux-shell'
           license=('MIT')
@@ -137,8 +138,10 @@ jobs:
             'cups-pk-helper: printer management'
           )
           makedepends=('git' 'go' 'make')
-          provides=('dms-shell' 'dms-git')
-          conflicts=('dms-shell' 'dms-git')
+          provides=('dms-shell' 'dms-git' 'dms-shell-git')
+          conflicts=('dms-shell' 'dms-git' 'dms-shell-git')
+          replaces=('dms-shell-git')
+
           # No separate debug package: the binary is stripped on purpose.
           options=('!debug')
 
@@ -201,7 +204,6 @@ jobs:
               -o dms \
               ./cmd/dms
 
-            # Write to a real file first (process substitution + install -D is fragile).
             local info="$srcdir/build-info.txt"
             {
               echo "repository=${url}"
@@ -326,9 +328,11 @@ jobs:
         run: |
           set -euo pipefail
           BUILD_DIR=/home/builder/dms-build
+
           PKG_PATH="$(find "$BUILD_DIR" -maxdepth 1 -type f \
-            -name 'dms-shell-git-*.pkg.tar.zst' \
-            ! -name 'dms-shell-git-debug-*' -print -quit)"
+            -name 'dux-shell-*.pkg.tar.zst' \
+            ! -name 'dux-shell-debug-*' -print -quit)"
+
           if [[ -z "$PKG_PATH" ]]; then
             echo "ERROR: Main package not found."
             ls -lah "$BUILD_DIR"
@@ -341,7 +345,7 @@ jobs:
 
           for required in \
             'usr/bin/dms' \
-            'usr/share/doc/dms-shell-git/build-info.txt' \
+            'usr/share/doc/dux-shell/build-info.txt' \
             'usr/lib/systemd/user/dms.service' \
             'usr/share/icons/hicolor/scalable/apps/dev.duxlabs.shell.svg'
           do
@@ -365,10 +369,12 @@ jobs:
           file "$DMS"
           go version -m "$DMS" | grep -E \
             'path|build|CGO_ENABLED|GOARCH|GOAMD64|GOOS|tags|trimpath|vcs.revision|vcs.time' || true
+
           go version -m "$DMS" | grep -q 'GOAMD64=v3' || {
             echo "ERROR: Binary is not GOAMD64=v3."
             exit 1
           }
+
           readelf -h "$DMS" | grep -E 'Type:|Machine:|OS/ABI:'
           readelf -h "$DMS" | grep -Eq 'Type:[[:space:]]+DYN' || {
             echo "ERROR: Expected a PIE (ELF DYN) executable."
@@ -376,7 +382,8 @@ jobs:
           }
 
           COMMIT="$(sed -n 's/^commit=//p' \
-            "$VERIFY_DIR/usr/share/doc/dms-shell-git/build-info.txt")"
+            "$VERIFY_DIR/usr/share/doc/dux-shell/build-info.txt")"
+
           [[ "$COMMIT" == "$UPSTREAM_COMMIT" ]] || {
             echo "ERROR: built commit $COMMIT does not match expected $UPSTREAM_COMMIT"
             exit 1
@@ -391,7 +398,8 @@ jobs:
           cp "$PKG_PATH" "${PKG_PATH}.sha256" "$RELEASE_DIR/"
 
           VERSION="$(basename "$PKG_PATH" | sed -E \
-            's/^dms-shell-git-(.*)-x86_64\.pkg\.tar\.zst$/\1/')"
+            's/^dux-shell-(.*)-x86_64\.pkg\.tar\.zst$/\1/')"
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           ls -lh "$RELEASE_DIR"
 
@@ -399,12 +407,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: dms-${{ needs.check.outputs.short }}
-          name: dms-shell-git ${{ steps.verify.outputs.version }} (Dux Shell 2.x / Zen 3)
+          name: dux-shell ${{ steps.verify.outputs.version }} (Zen 3)
           overwrite_files: true
           fail_on_unmatched_files: true
           make_latest: true
           body: |
-            ## Dux Shell (DMS) Git Build
+            ## Dux Shell - Arch Linux Package
 
             Built from upstream commit `${{ needs.check.outputs.commit }}`.
 
@@ -416,11 +424,12 @@ jobs:
             - PIE: enabled
             - UI: embedded from upstream `quickshell/` using `make sync-shell`
             - Source repository: `https://github.com/duxlabs-dev/dux-shell`
-            - Package format: Arch Linux `.pkg.tar.zst`
+            - Arch package name: `dux-shell`
+            - Package format: `.pkg.tar.zst`
 
             ### Installation
             ```bash
-            sudo pacman -U dms-shell-git-*.pkg.tar.zst
+            sudo pacman -U dux-shell-*.pkg.tar.zst
             ```
 
             ### Compatibility
@@ -430,3 +439,4 @@ jobs:
             /home/builder/release/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
