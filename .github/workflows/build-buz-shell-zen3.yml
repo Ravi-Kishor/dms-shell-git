@@ -77,9 +77,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          pacman -Sy --noconfirm --noprogressbar archlinux-keyring
           pacman -Syu --noconfirm --noprogressbar
           pacman -S --needed --noconfirm --noprogressbar \
-            base-devel git go make binutils libarchive file zstd
+            base-devel git go
 
           echo "Installed toolchain:"
           go version
@@ -119,6 +120,13 @@ jobs:
           git -C /home/builder/dms-build/src/dux-shell checkout --detach "$UPSTREAM_COMMIT"
           git -C /home/builder/dms-build/src/dux-shell submodule update --init --recursive --depth 1
 
+          cat > /home/builder/.makepkg.conf <<'EOF'
+          PACKAGER="Ravi Kishor <github@ravi>"
+          MAKEFLAGS="-j$(nproc)"
+          COMPRESSZST=(zstd -c -T0 --ultra -20 -)
+          PKGEXT='.pkg.tar.zst'
+          EOF
+
           cat > /home/builder/dms-build/PKGBUILD <<'PKGBUILD'
           pkgname=dux-shell
           pkgver=0
@@ -146,8 +154,8 @@ jobs:
           provides=('dms-shell' 'dms-git' 'dms-shell-git')
           conflicts=('dms-shell' 'dms-git' 'dms-shell-git')
 
-          # No separate debug package: the binary is stripped on purpose.
-          options=('!debug' '!lto')
+          # Go already strips symbols/DWARF via -ldflags="-s -w"; !strip protects Go buildinfo
+          options=('!debug' '!lto' '!strip')
 
           _repo_name="dux-shell"
 
@@ -220,9 +228,11 @@ jobs:
             if [[ -f "$root/assets/systemd/dms.service" ]]; then
               install -Dm0644 "$root/assets/systemd/dms.service" \
                 "$pkgdir/usr/lib/systemd/user/dms.service"
-              # APU memory optimization (Ryzen 5600GT): cap background Go heap growth
-              # and enable threaded Qt scene graph rendering
-              sed -i '/^\[Service\]/a Environment="GOGC=75" "GOMEMLIMIT=150MiB" "QSG_RENDER_LOOP=threaded"' \
+              # Zen 3 / 5600GT memory & render tuning:
+              # - Tight Go GC + 4-thread cap to avoid 12-thread P/mcache overhead
+              # - glibc arena cap + low trim/mmap thresholds for Qt6/dux-qt-base & Mesa
+              # - Threaded Qt scene graph for smooth 144 Hz rendering on radeonsi
+              sed -i '/^\[Service\]/a Environment="GOGC=50" "GOMEMLIMIT=96MiB" "GOMAXPROCS=4"\nEnvironment="GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=65536:glibc.malloc.mmap_threshold=65536"\nEnvironment="QSG_RENDER_LOOP=threaded"' \
                 "$pkgdir/usr/lib/systemd/user/dms.service"
             else
               error "Required upstream service missing: assets/systemd/dms.service"
@@ -269,11 +279,6 @@ jobs:
             do
               [[ -s "$comp" ]] || error "Completion generation produced an empty file: $comp"
             done
-
-            if [[ -d "$root/docs" ]]; then
-              install -d "$pkgdir/usr/share/doc/$pkgname/docs"
-              cp -a "$root/docs/." "$pkgdir/usr/share/doc/$pkgname/docs/"
-            fi
           }
           PKGBUILD
 
@@ -283,13 +288,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sed -i 's/^COMPRESSZST=.*/COMPRESSZST=(zstd -c -T0 --ultra -22 -)/' /etc/makepkg.conf
-
-          su builder -s /bin/bash -c '
+          su - builder -c '
             set -euo pipefail
             cd /home/builder/dms-build
-            export PACKAGER="Ravi Kishor <github@ravi>"
-            export MAKEFLAGS="-j$(nproc)"
             export GOPATH="/home/builder/go"
             export GOMODCACHE="/home/builder/go/pkg/mod"
             export GOCACHE="/home/builder/.cache/go-build"
@@ -342,7 +343,11 @@ jobs:
           bsdtar -xf "$PKG_PATH" -C "$VERIFY_DIR"
           DMS="$VERIFY_DIR/usr/bin/dms"
 
+          echo "Injected systemd service tuning:"
+          grep -E '^(\[Service\]|Environment=)' "$VERIFY_DIR/usr/lib/systemd/user/dms.service"
+
           file "$DMS"
+          ls -lh "$DMS"
           go version -m "$DMS" | grep -E \
             'path|build|CGO_ENABLED|GOARCH|GOAMD64|GOOS|tags|trimpath|vcs.revision|vcs.time' || true
 
@@ -380,7 +385,7 @@ jobs:
           ls -lh "$RELEASE_DIR"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: dms-${{ needs.check.outputs.short }}
           name: dux-shell ${{ steps.verify.outputs.version }} (Zen 3)
@@ -400,10 +405,10 @@ jobs:
             - CGO: disabled, matching upstream's core build
             - PIE: enabled (`-pgo=auto`)
             - UI: embedded from upstream `quickshell/` using `make sync-shell`
-            - Service tuning: `GOGC=75`, `GOMEMLIMIT=150MiB`, `QSG_RENDER_LOOP=threaded`
+            - Service tuning: `GOGC=50`, `GOMEMLIMIT=96MiB`, `GOMAXPROCS=4`, `GLIBC_TUNABLES` (2 arenas / 64 KB trim & mmap), `QSG_RENDER_LOOP=threaded`
             - Source repository: `https://github.com/duxlabs-dev/dux-shell`
             - Arch package name: `dux-shell`
-            - Package format: `.pkg.tar.zst`
+            - Package format: `.pkg.tar.zst` (`zstd --ultra -20`)
 
             ### Installation
             ```bash
