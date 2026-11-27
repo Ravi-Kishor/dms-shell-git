@@ -107,7 +107,7 @@ jobs:
           path: |
             /home/builder/go/pkg/mod
             /home/builder/.cache/go-build
-          key: dms-go-zen3-${{ needs.check.outputs.commit }}
+          key: dms-go-zen3-${{ needs.check.outputs.short }}
           restore-keys: |
             dms-go-zen3-
 
@@ -154,7 +154,8 @@ jobs:
           provides=('dms-shell' 'dms-git' 'dms-shell-git')
           conflicts=('dms-shell' 'dms-git' 'dms-shell-git')
 
-          # Go already strips symbols/DWARF via -ldflags="-s -w"; !strip protects Go buildinfo
+          # Pure Go binary (CGO_ENABLED=0): -ldflags="-s -w" strips symbols/DWARF;
+          # !strip protects Go buildinfo, and !lto avoids C/C++ LTO flags.
           options=('!debug' '!lto' '!strip')
 
           _repo_name="dux-shell"
@@ -185,6 +186,12 @@ jobs:
               error "Embedded shell directory missing after make sync-shell"
             }
 
+            local pgo_status="inactive (no cmd/dms/default.pgo)"
+            if [[ -s cmd/dms/default.pgo ]]; then
+              pgo_status="active (cmd/dms/default.pgo)"
+            fi
+            msg2 "PGO status: ${pgo_status}"
+
             local version build_time commit go_ldflags
             version="$(git -C "$root" describe --tags --always 2>/dev/null || echo dev)"
             build_time="$(git -C "$root" show -s --format='%cI' HEAD)"
@@ -209,6 +216,7 @@ jobs:
               echo "go_version=$(go version)"
               echo "goamd64=${GOAMD64}"
               echo "cgo_enabled=${CGO_ENABLED}"
+              echo "pgo_status=${pgo_status}"
               echo "build_tags=distro_binary withshell"
             } > "$info"
           }
@@ -228,12 +236,22 @@ jobs:
             if [[ -f "$root/assets/systemd/dms.service" ]]; then
               install -Dm0644 "$root/assets/systemd/dms.service" \
                 "$pkgdir/usr/lib/systemd/user/dms.service"
-              # Zen 3 / 5600GT memory & render tuning:
-              # - Tight Go GC + 4-thread cap to avoid 12-thread P/mcache overhead
-              # - glibc arena cap + low trim/mmap thresholds for Qt6/dux-qt-base & Mesa
-              # - Threaded Qt scene graph for smooth 144 Hz rendering on radeonsi
-              sed -i '/^\[Service\]/a Environment="GOGC=50" "GOMEMLIMIT=96MiB" "GOMAXPROCS=4"\nEnvironment="GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=65536:glibc.malloc.mmap_threshold=65536"\nEnvironment="QSG_RENDER_LOOP=threaded"' \
-                "$pkgdir/usr/lib/systemd/user/dms.service"
+
+              # Drop-in runtime tuning for Zen 3 / 5600GT (Vega 7 / 144 Hz):
+              # - Balanced Go GC (avoids GC CPU thrashing while keeping heap compact)
+              # - 4-thread Go scheduler cap to reduce P/mcache overhead
+              # - glibc arena & trim tuning inherited by dux-qt-base / Qt6 / Mesa
+              # - Threaded Qt Quick scene graph for 144 Hz radeonsi rendering
+              # - Suppress noisy Qt debug/QPA journal logging
+              install -d "$pkgdir/usr/lib/systemd/user/dms.service.d"
+              printf '%s\n' \
+                '[Service]' \
+                'Environment="GOGC=75" "GOMEMLIMIT=128MiB" "GOMAXPROCS=4"' \
+                'Environment="GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.trim_threshold=65536:glibc.malloc.mmap_threshold=65536"' \
+                'Environment="QSG_RENDER_LOOP=threaded"' \
+                'Environment="QT_LOGGING_RULES=*.debug=false;qt.qpa.*=false"' \
+                > "$pkgdir/usr/lib/systemd/user/dms.service.d/10-zen3-tuning.conf"
+              chmod 0644 "$pkgdir/usr/lib/systemd/user/dms.service.d/10-zen3-tuning.conf"
             else
               error "Required upstream service missing: assets/systemd/dms.service"
             fi
@@ -324,6 +342,7 @@ jobs:
             'usr/bin/dms' \
             'usr/share/doc/dux-shell/build-info.txt' \
             'usr/lib/systemd/user/dms.service' \
+            'usr/lib/systemd/user/dms.service.d/10-zen3-tuning.conf' \
             'usr/share/icons/hicolor/scalable/apps/dev.duxlabs.shell.svg'
           do
             grep -qx "$required" /tmp/package-contents.txt || {
@@ -343,8 +362,11 @@ jobs:
           bsdtar -xf "$PKG_PATH" -C "$VERIFY_DIR"
           DMS="$VERIFY_DIR/usr/bin/dms"
 
-          echo "Injected systemd service tuning:"
-          grep -E '^(\[Service\]|Environment=)' "$VERIFY_DIR/usr/lib/systemd/user/dms.service"
+          echo "Build info:"
+          cat "$VERIFY_DIR/usr/share/doc/dux-shell/build-info.txt"
+
+          echo "Systemd drop-in tuning:"
+          cat "$VERIFY_DIR/usr/lib/systemd/user/dms.service.d/10-zen3-tuning.conf"
 
           file "$DMS"
           ls -lh "$DMS"
@@ -405,7 +427,7 @@ jobs:
             - CGO: disabled, matching upstream's core build
             - PIE: enabled (`-pgo=auto`)
             - UI: embedded from upstream `quickshell/` using `make sync-shell`
-            - Service tuning: `GOGC=50`, `GOMEMLIMIT=96MiB`, `GOMAXPROCS=4`, `GLIBC_TUNABLES` (2 arenas / 64 KB trim & mmap), `QSG_RENDER_LOOP=threaded`
+            - Runtime drop-in (`10-zen3-tuning.conf`): `GOGC=75`, `GOMEMLIMIT=128MiB`, `GOMAXPROCS=4`, `GLIBC_TUNABLES` (2 arenas / 64 KB trim & mmap), `QSG_RENDER_LOOP=threaded`, quiet Qt debug logging
             - Source repository: `https://github.com/duxlabs-dev/dux-shell`
             - Arch package name: `dux-shell`
             - Package format: `.pkg.tar.zst` (`zstd --ultra -20`)
