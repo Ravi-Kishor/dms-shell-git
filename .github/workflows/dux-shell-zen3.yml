@@ -111,7 +111,7 @@ jobs:
           restore-keys: |
             dms-go-zen3-
 
-      - name: Pre-clone upstream, patch clipboard popout, and generate PKGBUILD
+      - name: Pre-clone upstream, patch QML issues, and generate PKGBUILD
         shell: bash
         run: |
           set -euo pipefail
@@ -120,19 +120,21 @@ jobs:
           git -C /home/builder/dms-build/src/dux-shell checkout --detach "$UPSTREAM_COMMIT"
           git -C /home/builder/dms-build/src/dux-shell submodule update --init --recursive --depth 1
 
-          # Patch bar clipboard popout race before make sync-shell embeds quickshell/
+          # Patch QML issues before make sync-shell embeds quickshell/
           python3 - /home/builder/dms-build/src/dux-shell <<'PYEOF'
           import os, sys
 
           repo = sys.argv[1]
-          path = os.path.join(repo, "quickshell", "Modals", "Clipboard", "ClipboardHistoryPopout.qml")
-          if not os.path.isfile(path):
-              sys.exit(f"ERROR: {path} not found")
 
-          with open(path, "r", encoding="utf-8") as f:
-              src = f.read()
+          # 1. ClipboardHistoryPopout.qml: reset popout state before refreshing entries
+          clip_path = os.path.join(repo, "quickshell", "Modals", "Clipboard", "ClipboardHistoryPopout.qml")
+          if not os.path.isfile(clip_path):
+              sys.exit(f"ERROR: {clip_path} not found")
 
-          old = (
+          with open(clip_path, "r", encoding="utf-8") as f:
+              clip_src = f.read()
+
+          clip_old = (
               "    onShouldBeVisibleChanged: {\n"
               "        if (!shouldBeVisible) {\n"
               "            releaseTextInputFocus();\n"
@@ -162,7 +164,7 @@ jobs:
               "    }"
           )
 
-          new = (
+          clip_new = (
               "    onShouldBeVisibleChanged: {\n"
               "        if (!shouldBeVisible) {\n"
               "            releaseTextInputFocus();\n"
@@ -187,14 +189,97 @@ jobs:
               "    }"
           )
 
-          if old in src:
-              with open(path, "w", encoding="utf-8") as f:
-                  f.write(src.replace(old, new, 1))
-              print(f"Patched {path} successfully")
-          elif new in src:
-              print(f"Upstream already contains the fix in {path}; skipping patch")
+          if clip_old in clip_src:
+              with open(clip_path, "w", encoding="utf-8") as f:
+                  f.write(clip_src.replace(clip_old, clip_new, 1))
+              print(f"Patched {clip_path} successfully")
+          elif clip_new in clip_src:
+              print(f"Upstream already contains clipboard fix in {clip_path}; skipping")
           else:
-              sys.exit(f"ERROR: Target block not found in {path} (upstream changed; review ClipboardHistoryPopout.qml)")
+              sys.exit(f"ERROR: Target block not found in {clip_path}")
+
+          # 2. BarEditor.qml: wait for LazyLoader item incubation before configuring/showing picker
+          bar_path = os.path.join(repo, "quickshell", "Modules", "DBar", "BarEditor.qml")
+          if not os.path.isfile(bar_path):
+              sys.exit(f"ERROR: {bar_path} not found")
+
+          with open(bar_path, "r", encoding="utf-8") as f:
+              bar_src = f.read()
+
+          bar_pick_old = (
+              "    property int addIndex: -1\n\n"
+              "    onEntriesChanged: cancelDrag()"
+          )
+          bar_pick_new = (
+              "    property int addIndex: -1\n"
+              "    property string addSection: \"\"\n"
+              "    property var addWidgets: []\n"
+              "    property bool pickerShowQueued: false\n\n"
+              "    onEntriesChanged: cancelDrag()"
+          )
+
+          bar_fn_old = (
+              "    function pickWidget(section, index) {\n"
+              "        addIndex = index;\n"
+              "        pickerLoader.active = true;\n"
+              "        const picker = pickerLoader.item;\n"
+              "        picker.targetSection = section;\n"
+              "        picker.widgets = BarWidgetCatalog.addable(barConfig);\n"
+              "        picker.show();\n"
+              "    }"
+          )
+          bar_fn_new = (
+              "    function applyPickerState(picker) {\n"
+              "        if (!picker)\n"
+              "            return;\n"
+              "        picker.targetSection = addSection;\n"
+              "        picker.widgets = addWidgets;\n"
+              "        picker.show();\n"
+              "    }\n\n"
+              "    function pickWidget(section, index) {\n"
+              "        addIndex = index;\n"
+              "        addSection = section;\n"
+              "        addWidgets = BarWidgetCatalog.addable(barConfig);\n"
+              "        pickerLoader.active = true;\n"
+              "        if (pickerLoader.item) {\n"
+              "            pickerShowQueued = false;\n"
+              "            applyPickerState(pickerLoader.item);\n"
+              "            return;\n"
+              "        }\n"
+              "        pickerShowQueued = true;\n"
+              "    }"
+          )
+
+          bar_loader_old = (
+              "    LazyLoader {\n"
+              "        id: pickerLoader\n"
+              "        active: false\n\n"
+              "        WidgetSelectionPopup {"
+          )
+          bar_loader_new = (
+              "    LazyLoader {\n"
+              "        id: pickerLoader\n"
+              "        active: false\n\n"
+              "        onItemChanged: {\n"
+              "            if (item && root.pickerShowQueued) {\n"
+              "                root.pickerShowQueued = false;\n"
+              "                root.applyPickerState(item);\n"
+              "            }\n"
+              "        }\n\n"
+              "        WidgetSelectionPopup {"
+          )
+
+          if bar_pick_old in bar_src and bar_fn_old in bar_src and bar_loader_old in bar_src:
+              bar_src = bar_src.replace(bar_pick_old, bar_pick_new, 1)
+              bar_src = bar_src.replace(bar_fn_old, bar_fn_new, 1)
+              bar_src = bar_src.replace(bar_loader_old, bar_loader_new, 1)
+              with open(bar_path, "w", encoding="utf-8") as f:
+                  f.write(bar_src)
+              print(f"Patched {bar_path} successfully")
+          elif "applyPickerState" in bar_src:
+              print(f"Upstream already contains bar picker fix in {bar_path}; skipping")
+          else:
+              sys.exit(f"ERROR: Target blocks not found in {bar_path}")
           PYEOF
 
           cat > /home/builder/.makepkg.conf <<'EOF'
@@ -503,7 +588,7 @@ jobs:
             - Minimum Go toolchain: `1.27.1`
             - CGO: disabled, matching upstream's core build
             - PIE: enabled (`-pgo=auto`)
-            - UI: embedded from upstream `quickshell/` using `make sync-shell` (with `ClipboardHistoryPopout.qml` reset-before-refresh patch)
+            - UI: embedded from upstream `quickshell/` using `make sync-shell` (with `ClipboardHistoryPopout.qml` and `BarEditor.qml` patches)
             - Runtime drop-in (`10-zen3-tuning.conf`): `GOGC=75`, `GOMEMLIMIT=128MiB`, `GOMAXPROCS=4`, `GLIBC_TUNABLES` (2 arenas / 64 KB trim & mmap), `QSG_RENDER_LOOP=threaded`, quiet Qt debug logging
             - Source repository: `https://github.com/duxlabs-dev/dux-shell`
             - Arch package name: `dux-shell`
