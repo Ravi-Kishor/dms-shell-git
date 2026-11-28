@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "0 */6 * * *"
+    #- cron: "0 */6 * * *"
 
 permissions:
   contents: write
@@ -122,71 +122,70 @@ jobs:
 
           # Patch bar clipboard popout race before make sync-shell embeds quickshell/
           python3 - /home/builder/dms-build/src/dux-shell <<'PYEOF'
-          import glob, os, sys
+          import os, sys
 
           repo = sys.argv[1]
-          matches = glob.glob(os.path.join(repo, "**", "Modals", "Clipboard", "ClipboardHistoryPopout.qml"), recursive=True)
-          if not matches:
-              sys.exit("ERROR: ClipboardHistoryPopout.qml not found")
+          path = os.path.join(repo, "quickshell", "Modals", "Clipboard", "ClipboardHistoryPopout.qml")
+          if not os.path.isfile(path):
+              sys.exit(f"ERROR: {path} not found")
 
-          path = matches[0]
           with open(path, "r", encoding="utf-8") as f:
               src = f.read()
 
-          old = """    onShouldBeVisibleChanged: {
-                  if (!shouldBeVisible) {
-                      releaseTextInputFocus();
-                      return;
-                  }
-                  if (clipboardAvailable) {
-                      if (Theme.isConnectedEffect) {
-                          Qt.callLater(() => {
-                              if (root.shouldBeVisible) {
-                                  ClipboardService.refresh();
-                              }
-                          });
-                      } else {
-                          ClipboardService.refresh();
-                      }
-                  }
-                  Qt.callLater(function () {
-                      if (contentLoader.item) {
-                          contentLoader.item.activeTab = activeTab;
-                          contentLoader.item.resetState();
-                      }
-                      if (contentLoader.item?.searchField) {
-                          contentLoader.item.searchField.text = "";
-                          contentLoader.item.searchField.forceActiveFocus();
-                      }
-                  });
-              }"""
+          old = (
+              "    onShouldBeVisibleChanged: {\n"
+              "        if (!shouldBeVisible) {\n"
+              "            releaseTextInputFocus();\n"
+              "            return;\n"
+              "        }\n"
+              "        if (clipboardAvailable) {\n"
+              "            if (Theme.isConnectedEffect) {\n"
+              "                Qt.callLater(() => {\n"
+              "                    if (root.shouldBeVisible) {\n"
+              "                        ClipboardService.refresh();\n"
+              "                    }\n"
+              "                });\n"
+              "            } else {\n"
+              "                ClipboardService.refresh();\n"
+              "            }\n"
+              "        }\n"
+              "        Qt.callLater(function () {\n"
+              "            if (contentLoader.item) {\n"
+              "                contentLoader.item.activeTab = activeTab;\n"
+              "                contentLoader.item.resetState();\n"
+              "            }\n"
+              "            if (contentLoader.item?.searchField) {\n"
+              "                contentLoader.item.searchField.text = \"\";\n"
+              "                contentLoader.item.searchField.forceActiveFocus();\n"
+              "            }\n"
+              "        });\n"
+              "    }"
+          )
 
-          # Normalize indentation against the actual file
-          old = "\n".join(line[10:] if line.startswith("          ") else line for line in old.splitlines())
-
-          new = """    onShouldBeVisibleChanged: {
-                  if (!shouldBeVisible) {
-                      releaseTextInputFocus();
-                      return;
-                  }
-                  Qt.callLater(function () {
-                      if (!root.shouldBeVisible) {
-                          return;
-                      }
-                      if (contentLoader.item) {
-                          contentLoader.item.activeTab = activeTab;
-                          contentLoader.item.resetState();
-                      }
-                      if (root.clipboardAvailable) {
-                          ClipboardService.refresh();
-                      }
-                      if (contentLoader.item?.searchField) {
-                          contentLoader.item.searchField.text = "";
-                          contentLoader.item.searchField.forceActiveFocus();
-                      }
-                  });
-              }"""
-          new = "\n".join(line[10:] if line.startswith("          ") else line for line in new.splitlines())
+          new = (
+              "    onShouldBeVisibleChanged: {\n"
+              "        if (!shouldBeVisible) {\n"
+              "            releaseTextInputFocus();\n"
+              "            return;\n"
+              "        }\n"
+              "        Qt.callLater(function () {\n"
+              "            if (!root.shouldBeVisible) {\n"
+              "                return;\n"
+              "            }\n"
+              "            if (contentLoader.item) {\n"
+              "                contentLoader.item.activeTab = activeTab;\n"
+              "                contentLoader.item.resetState();\n"
+              "            }\n"
+              "            if (root.clipboardAvailable) {\n"
+              "                ClipboardService.refresh();\n"
+              "            }\n"
+              "            if (contentLoader.item?.searchField) {\n"
+              "                contentLoader.item.searchField.text = \"\";\n"
+              "                contentLoader.item.searchField.forceActiveFocus();\n"
+              "            }\n"
+              "        });\n"
+              "    }"
+          )
 
           if old in src:
               with open(path, "w", encoding="utf-8") as f:
