@@ -80,7 +80,7 @@ jobs:
           pacman -Sy --noconfirm --noprogressbar archlinux-keyring
           pacman -Syu --noconfirm --noprogressbar
           pacman -S --needed --noconfirm --noprogressbar \
-            base-devel git go
+            base-devel git go python
 
           echo "Installed toolchain:"
           go version
@@ -111,7 +111,7 @@ jobs:
           restore-keys: |
             dms-go-zen3-
 
-      - name: Pre-clone upstream and generate PKGBUILD for Dux Shell 2.x
+      - name: Pre-clone upstream, patch clipboard popout, and generate PKGBUILD
         shell: bash
         run: |
           set -euo pipefail
@@ -119,6 +119,84 @@ jobs:
           git clone --filter=blob:none --no-checkout "$UPSTREAM_REPO" /home/builder/dms-build/src/dux-shell
           git -C /home/builder/dms-build/src/dux-shell checkout --detach "$UPSTREAM_COMMIT"
           git -C /home/builder/dms-build/src/dux-shell submodule update --init --recursive --depth 1
+
+          # Patch bar clipboard popout race before make sync-shell embeds quickshell/
+          python3 - /home/builder/dms-build/src/dux-shell <<'PYEOF'
+          import glob, os, sys
+
+          repo = sys.argv[1]
+          matches = glob.glob(os.path.join(repo, "**", "Modals", "Clipboard", "ClipboardHistoryPopout.qml"), recursive=True)
+          if not matches:
+              sys.exit("ERROR: ClipboardHistoryPopout.qml not found")
+
+          path = matches[0]
+          with open(path, "r", encoding="utf-8") as f:
+              src = f.read()
+
+          old = """    onShouldBeVisibleChanged: {
+                  if (!shouldBeVisible) {
+                      releaseTextInputFocus();
+                      return;
+                  }
+                  if (clipboardAvailable) {
+                      if (Theme.isConnectedEffect) {
+                          Qt.callLater(() => {
+                              if (root.shouldBeVisible) {
+                                  ClipboardService.refresh();
+                              }
+                          });
+                      } else {
+                          ClipboardService.refresh();
+                      }
+                  }
+                  Qt.callLater(function () {
+                      if (contentLoader.item) {
+                          contentLoader.item.activeTab = activeTab;
+                          contentLoader.item.resetState();
+                      }
+                      if (contentLoader.item?.searchField) {
+                          contentLoader.item.searchField.text = "";
+                          contentLoader.item.searchField.forceActiveFocus();
+                      }
+                  });
+              }"""
+
+          # Normalize indentation against the actual file
+          old = "\n".join(line[10:] if line.startswith("          ") else line for line in old.splitlines())
+
+          new = """    onShouldBeVisibleChanged: {
+                  if (!shouldBeVisible) {
+                      releaseTextInputFocus();
+                      return;
+                  }
+                  Qt.callLater(function () {
+                      if (!root.shouldBeVisible) {
+                          return;
+                      }
+                      if (contentLoader.item) {
+                          contentLoader.item.activeTab = activeTab;
+                          contentLoader.item.resetState();
+                      }
+                      if (root.clipboardAvailable) {
+                          ClipboardService.refresh();
+                      }
+                      if (contentLoader.item?.searchField) {
+                          contentLoader.item.searchField.text = "";
+                          contentLoader.item.searchField.forceActiveFocus();
+                      }
+                  });
+              }"""
+          new = "\n".join(line[10:] if line.startswith("          ") else line for line in new.splitlines())
+
+          if old in src:
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(src.replace(old, new, 1))
+              print(f"Patched {path} successfully")
+          elif new in src:
+              print(f"Upstream already contains the fix in {path}; skipping patch")
+          else:
+              sys.exit(f"ERROR: Target block not found in {path} (upstream changed; review ClipboardHistoryPopout.qml)")
+          PYEOF
 
           cat > /home/builder/.makepkg.conf <<'EOF'
           PACKAGER="Ravi Kishor <github@ravi>"
@@ -426,7 +504,7 @@ jobs:
             - Minimum Go toolchain: `1.27.1`
             - CGO: disabled, matching upstream's core build
             - PIE: enabled (`-pgo=auto`)
-            - UI: embedded from upstream `quickshell/` using `make sync-shell`
+            - UI: embedded from upstream `quickshell/` using `make sync-shell` (with `ClipboardHistoryPopout.qml` reset-before-refresh patch)
             - Runtime drop-in (`10-zen3-tuning.conf`): `GOGC=75`, `GOMEMLIMIT=128MiB`, `GOMAXPROCS=4`, `GLIBC_TUNABLES` (2 arenas / 64 KB trim & mmap), `QSG_RENDER_LOOP=threaded`, quiet Qt debug logging
             - Source repository: `https://github.com/duxlabs-dev/dux-shell`
             - Arch package name: `dux-shell`
